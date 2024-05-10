@@ -302,30 +302,178 @@ class Stable(Distribution):
         return pz
     
     def expand(self, batch_shape, _instance=None):
-        raise NotImplementedError
+        raise NotImplementedError("I don't know where is this relevant yet")
     
 
     def sample(self, sample_shape=torch.Size()):
-        raise NotImplementedError
+        raise NotImplementedError("Sampling not implemented")
     
 
     def rsample(self, sample_shape=torch.Size()):
-        raise NotImplementedError
+        raise NotImplementedError("Sampling not implemented")
     
 
-    def _pdf(self, value: torch.Tensor) -> torch.Tensor:
-        # TODO
-        pass
+    def pdf(self, value: torch.Tensor) -> torch.Tensor:
+        if self.parametrization == "S0":
+            return self._pdf(value, self.alpha, self.beta, self.loc, self.scale)
+        elif self.parametrization == "S1":
+            alpha = self.alpha
+            beta = self.beta
+            loc = self.loc
+            scale = self.scale
+            if torch.all(torch.reshape(self.alpha, (1, -1))[0, :] != 1.):
+                return self._pdf(value, alpha, beta, loc, scale)
+            else:
+                value = torch.reshape(value, (1, -1))[0, :]
+                value, alpha, beta = broadcast_all(value, alpha, beta)
+
+                data_in = torch.dstack((value, alpha, beta))[0]
+                data_out = torch.empty(size=(len(data_in), 1))
+
+                uniq_param_pairs = torch.unique(data_in[:, 1:], axis = 0)
+                for pair in uniq_param_pairs:
+                    _alpha, _beta = pair
+                    _delta = (loc + 2*_beta*scale * torch.log(scale) / torch.pi if alpha==1.0 else loc)
+                    data_mask = torch.all(data_in[:, 1:] == pair, axis=-1)
+                    _x = data_in[data_mask, 0]
+                    data_out[data_mask] = self._pdf(_x, _alpha, _beta, loc=_delta, scale=scale).reshape(len(_x), 1)
+
+                output = data_out.T
+                if output.shape == (1,):
+                    return output[0]
+                return output
+    
+
+    def _pdf(self, value, alpha, beta, loc, scale) -> torch.Tensor:
+        if self.parametrization == "S0":
+            _pdf_single_value_piecewise = _pdf_single_value_piecewise_Z0
+            _pdf_single_value_cf_integrate = _pdf_single_value_cf_integrate_Z0
+            _cf = _cf_Z0
+        elif self.parametrization == "S1":
+            _pdf_single_value_piecewise = _pdf_single_value_cf_integrate_Z1
+            _pdf_single_value_cf_integrate = _pdf_single_value_cf_integrate_Z1
+            _cf = _cf_Z1
+        
+        value = torch.reshape(value, (1, -1))[0, :]
+        # standardize
+        value = (value - loc) / scale
+
+        data_in = torch.dstack((value, alpha, beta))[0]
+        data_out = torch.empty(size=(len(data_in), 1))
+
+        pdf_default_method_name = self.pdf_default_method
+        if pdf_default_method_name in ("piecewise", "best", "zolotarev"):
+            pdf_single_value_method = _pdf_single_value_piecewise
+        elif pdf_default_method_name in ("dni", "quadrature"):
+            pdf_single_value_method = _pdf_single_value_cf_integrate
+        else:
+            raise ValueError(f"PDF method '{self.pdf_default_method}' not supported")
+        
+        pdf_single_value_kwds = {
+            "quad_eps": self.quad_eps,
+            "piecewise_x_tol_near_zeta": self.piecewise_x_tol_near_zeta,
+            "piecewise_alpha_tol_near_one": self.piecewise_alpha_tol_near_one,
+        }
+
+        # no fft support (by now)
+
+        uniq_param_pairs = torch.unique(data_in[:, 1:], axis=0)
+        for pair in uniq_param_pairs:
+            data_mask = torch.all(data_in[:, 1:] == pair, axis=-1)
+            data_subset = data_in[data_mask]
+            data_out[data_mask] = torch.tensor(
+                [
+                    pdf_single_value_method(_value, _alpha, _beta, **pdf_single_value_kwds)
+                    for _value, _alpha, _beta in data_subset
+                ]
+            ).reshape(len(data_subset), 1)
+
+        # account for standardization
+        data_out = data_out / scale
+
+        return data_out.T[0]
 
 
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
-        # TODO
-        pass
-
+        return torch.log(self.pdf(value))
+    
 
     def cdf(self, value: torch.Tensor) -> torch.Tensor:
-        # TODO
-        pass
+        if self.parametrization == "S0":
+            return self._cdf(value, self.alpha, self.beta, self.loc, self.scale)
+        elif self.parametrization == "S1":
+            alpha = self.alpha
+            beta = self.beta
+            loc = self.loc
+            scale = self.scale
+            if torch.all(torch.reshape(self.alpha, (1, -1))[0, :] != 1.):
+                return self._cdf(value, alpha, beta, loc, scale)
+            else:
+                value = torch.reshape(value, (1, -1))[0, :]
+                value, alpha, beta = broadcast_all(value, alpha, beta)
+
+                data_in = torch.dstack((value, alpha, beta))[0]
+                data_out = torch.empty(size=(len(data_in), 1))
+
+                uniq_param_pairs = torch.unique(data_in[:, 1:], axis = 0)
+                for pair in uniq_param_pairs:
+                    _alpha, _beta = pair
+                    _delta = (loc + 2*_beta*scale * torch.log(scale) / torch.pi if alpha==1.0 else loc)
+                    data_mask = torch.all(data_in[:, 1:] == pair, axis=-1)
+                    _x = data_in[data_mask, 0]
+                    data_out[data_mask] = self._pdf(_x, _alpha, _beta, loc=_delta, scale=scale).reshape(len(_x), 1)
+
+                output = data_out.T
+                if output.shape == (1,):
+                    return output[0]
+                return output
+    
+
+    def _cdf(self, value, alpha, beta, loc, scale):
+        if self.parametrization == "S0":
+            _cdf_single_value_piecewise = _cdf_single_value_piecewise_Z0
+            _cf = _cf_Z0
+        elif self.parametrization == "S1":
+            _cdf_single_value_piecewise = _cdf_single_value_piecewise_Z1
+            _cf = _cf_Z1
+
+        value = torch.reshape(value, (1, -1))[0, :]
+        # standardize
+        value = (value - loc) / scale
+
+        value, alpha, beta = broadcast_all(value, alpha, beta)
+
+        data_in = torch.dstack((value, alpha, beta))[0]
+        data_out = torch.empty(size=(len(data_in), 1))
+
+        cdf_default_method_name = self.cdf_default_method
+        if cdf_default_method_name in ("piecewise", "best", "zolotarev"):
+            cdf_single_value_method = _cdf_single_value_piecewise
+        else:
+            raise ValueError(f"PDF method '{self.pdf_default_method}' not supported")
+        
+        cdf_single_value_kwds = {
+            "quad_eps": self.quad_eps,
+            "piecewise_x_tol_near_zeta": self.piecewise_x_tol_near_zeta,
+            "piecewise_alpha_tol_near_one": self.piecewise_alpha_tol_near_one,
+        }
+
+        # fft not supported (by now)
+        uniq_param_pairs = torch.unique(data_in[:, 1:], axis=0)
+        for pair in uniq_param_pairs:
+            data_mask = torch.all(data_in[:, 1:] == pair, axis=-1)
+            data_subset = data_in[data_mask]
+            data_out[data_mask] = torch.tensor(
+                [
+                    cdf_single_value_method(_value, _alpha, _beta, **cdf_single_value_kwds)
+                    for _value, _alpha, _beta in data_subset
+                ]
+            ).reshape(len(data_subset), 1)
+            
+        # account for standardization
+        data_out = data_out / scale
+
+        return data_out.T[0]
 
 
     def icdf(self, value: torch.Tensor) -> torch.Tensor:
