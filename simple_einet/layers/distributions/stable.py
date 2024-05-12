@@ -57,6 +57,15 @@ _cf_Z1 = partial(_cf, _Phi_Z1)
 
 
 def _pdf_single_value_cf_integrate(Phi, x, alpha, beta, **kwds):
+    # NOTE
+    # the direct numeric integration method of stable distribtions fails easily
+    # this can be observed using following different approaches:
+    # - hermite-gauss quadrature, because the distribution to integrate does not necessarily satisfy all assumptions of hermite-gauss, i.e. it is not of the form x**2
+    # - numpy.quad: while yielding good results around the critical mass of the PDF/CDF, it diverges on other areas and is not reliable
+    # - torchquad: requires bound integration interval, which is infeasible for this task. transforming the indefinite integral to the unit interval yields diverging results
+    # the only reliable approach to the computation of PDF and CDF of stable RVs is the piecewise integration developed by Nolan1999 and implemented by scipy.stats.levy_stable
+    import warnings
+    warnings.warn("This method is buggy!", RuntimeWarning)
     quad_eps = kwds.get("quad_eps", _QUAD_EPS)
 
     # split up integral and use change of variables to project to unit interval
