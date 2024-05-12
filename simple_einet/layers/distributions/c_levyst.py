@@ -1,5 +1,6 @@
 import torch
 
+torch.set_default_dtype(torch.double)
 M_PI_2 = torch.tensor(1.57079632679489661923)
 M_1_PI = torch.tensor(0.31830988618379067154)
 M_2_PI = torch.tensor(0.63661977236758134308)  
@@ -38,16 +39,16 @@ class Nolan:
 
     
     def g_alpha_ne_one(self, theta: torch.Tensor) -> torch.Tensor:
-        if theta == -self.xi:
+        if torch.all(torch.isclose(theta, -self.xi)):
             if self.alpha < 1.:
                 return torch.tensor(0.)
             else:
-                return torch.inf
-        if theta == M_PI_2:
+                return torch.tensor(float('inf'))
+        if torch.all(torch.isclose(theta, M_PI_2.type(theta.dtype))):
             if self.alpha < 1.:
-                return torch.inf
+                return torch.tensor(float('inf'))
             else:
-                return 0
+                return torch.tensor(0.)
             
         cos_theta = torch.cos(theta)
         return (
@@ -62,10 +63,10 @@ class Nolan:
     
     
     def g_alpha_eq_one(self, theta: torch.Tensor) -> torch.Tensor: 
-        if theta == -self.xi:
-            return 0
-        if theta == M_PI_2:
-            return torch.inf
+        if torch.all(torch.isclose(theta, -self.xi)):
+            return torch.tensor(0.)
+        if torch.all(torch.isclose(theta, M_PI_2.type(theta.dtype))):
+            return torch.tensor(float('inf'))
         
         return (
             (1. + theta * self.two_beta_div_pi)
