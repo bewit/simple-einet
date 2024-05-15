@@ -17,7 +17,6 @@ from torch import distributions as dist
 from torch.distributions import constraints, Distribution
 from torch.distributions.utils import broadcast_all
 from torchquad import MonteCarlo
-from c_levyst import Nolan
 
 
 __all__ = ["Stable"]
