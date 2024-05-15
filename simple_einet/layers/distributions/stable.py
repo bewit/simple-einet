@@ -1,54 +1,134 @@
+# this is a torch implementation of https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.levy_stable.html 
+# thanks to the authors of SciPy and of the referenced file and its dependencies in particular
+# for docs, please see scipy.stats.levy_stable
+# I tried to stay as close to the original numpy implementation as possible (and kind of sensible)
+# nonetheless, I'm not that familiar with the computational and mathematical tweaks here, and the implemented solution might appear hacky
+# only the piecewise integration works, and as all integrations are carried out using MonteCarlo integration, the results are approximations and the respective errors are not quantified here (this is partly due to me not knowing how to do this and not having the time for researching it right now)
+# precision can be increased by choosing more MCIntegration evaluation nodes or increasing the number of repetitions per integration
+# according to the WLLN, the results converge in the infinite, but I cannot derive the convergence rate here; and the computation gets heavy quite quickly
+# please note that comparison to the scipy implementation still has to be carried out
+# if you want to contact me, you can find me via ORCID: https://orcid.org/0000-0002-6861-7301
 import math
-from numbers import Number, Real
+from numbers import Number
 from functools import partial
 
 import torch
 from torch import distributions as dist
 from torch.distributions import constraints, Distribution
 from torch.distributions.utils import broadcast_all
-from torchquad import MonteCarlo, VEGAS
+from torchquad import MonteCarlo
 from c_levyst import Nolan
 
-# I think this can be improved a lot
-# TODO: vectorize this to evaluate multiple pdf/cdf computations of the same distribution
-# TODO: precompute pdf/cdf for (alpha, beta)-grid (with 0.01 spacing?) and transform and map RV for lookup tables
 
 __all__ = ["Stable"]
 torch.set_default_dtype(torch.double)
-PI = torch.tensor(math.pi)
-# see doc of scipy.stats.levy_stable
-# I tried to stay as close to the original numpy implementation as possible (and kind of sensible)
-_QUAD_EPS = 1e-10
+M_PI = torch.tensor(math.pi)
+M_PI_2 = torch.tensor(1.57079632679489661923)
+M_1_PI = torch.tensor(0.31830988618379067154)
+M_2_PI = torch.tensor(0.63661977236758134308) 
 
 # heavily recommend MonteCarlo here, as the functions are too complex for Simpson/Trapezoid/Boole
 integrator = MonteCarlo()
-integrator_params = {"N": 10000}
+integrator_params = {"N": 20000}
 # Parameters for the LBFGS optimization used for determining tighter integration bounds for the CDF computation if alpha > 1.0
 LBFGS_EPOCHS = 20
 LBFGS_LR = 0.1
 # repetitions of all integral computations where alpha != 1.0. the mean over all computations is returned. 1 is sufficient, more increases precision
-INTEGRATION_REPETITIONS = 100
+INTEGRATION_REPETITIONS = 5
 # repetitions of all integral computations where alpha == 1.0. the mean over all computations is returned. I suggest at least 10
-INTEGRATION_REPETITIONS_ALPHA_1 = 100
+INTEGRATION_REPETITIONS_ALPHA_1 = 20
 
 
-def transform_half_real_line_to_unit_interval(fct, t):
+class Nolan:
+    def __init__(self, alpha: torch.Tensor, beta: torch.Tensor, x0: torch.Tensor):
+        self.alpha = alpha
+        self.zeta = -beta * torch.tan(M_PI_2 * alpha)
+
+        if alpha != 1.:
+            self.xi = torch.atan(-self.zeta) / alpha
+            self.zeta_prefactor = torch.pow(torch.pow(self.zeta, 2) + 1., -1. / (2. * (alpha - 1.)))
+            self.alpha_exp = alpha / (alpha - 1.)
+            self.alpha_xi = torch.atan(-self.zeta)
+            self.zeta_offset = x0 - self.zeta
+
+            if alpha < 1.:
+                self.c1 = 0.5 - self.xi * M_1_PI
+                self.c3 = M_1_PI
+            else: # alpha > 1.
+                self.c1 = torch.tensor(1.)
+                self.c3 = -M_1_PI
+
+            self.c2 = alpha * M_1_PI / torch.abs(alpha - 1.) / (x0 - self.zeta)
+            self.g = self.g_alpha_ne_one
+
+        else: # alpha == 1.
+            self.xi = M_PI_2
+            self.two_beta_div_pi = beta * M_2_PI
+            self.pi_div_two_beta = M_PI_2 / beta
+            self.x0_div_term = x0 / self.two_beta_div_pi
+            self.c1 = torch.tensor(0.)
+            self.c2 = 0.5 / torch.abs(beta)
+            self.c3 = M_1_PI
+            self.g = self.g_alpha_eq_one
+
+    
+    def g_alpha_ne_one(self, theta: torch.Tensor) -> torch.Tensor:
+        if torch.all(torch.isclose(theta, -self.xi)):
+            if self.alpha < 1.:
+                return torch.tensor(0.)
+            else:
+                return torch.tensor(float('inf'))
+        if torch.all(torch.isclose(theta, M_PI_2.type(theta.dtype))):
+            if self.alpha < 1.:
+                return torch.tensor(float('inf'))
+            else:
+                return torch.tensor(0.)
+            
+        cos_theta = torch.cos(theta)
+        return (
+            self.zeta_prefactor
+            * torch.pow(
+                cos_theta
+                / torch.sin(self.alpha_xi + self.alpha * theta)
+                * self.zeta_offset, self.alpha_exp)
+            * torch.cos(self.alpha_xi + (self.alpha - 1.) * theta)
+            / cos_theta
+        )
+    
+    
+    def g_alpha_eq_one(self, theta: torch.Tensor) -> torch.Tensor: 
+        if torch.all(torch.isclose(theta, -self.xi)):
+            return torch.zeros_like(theta)
+        if torch.all(theta == M_PI_2.type(theta.dtype)):
+            temp = torch.zeros_like(theta)
+            temp.fill_(float('inf'))
+            return temp
+        
+        return (
+            (1. + theta * self.two_beta_div_pi)
+            * torch.exp((self.pi_div_two_beta + theta) * torch.tan(theta) - self.x0_div_term)
+            / torch.cos(theta)
+        )
+
+
+def _transform_half_real_line_to_unit_interval(fct, t):
+    """Given a function that is defined on [0, +inf), transform it to the domain [0, 1]"""
     return fct(t/(1-t)) / torch.pow(1-t, 2)
 
 
 def _Phi_Z0(alpha, t):
     return (
-        -torch.tan(PI * alpha / 2) * (torch.pow(torch.abs(t), (1 - alpha)) - 1)
+        -torch.tan(M_PI * alpha / 2) * (torch.pow(torch.abs(t), (1 - alpha)) - 1)
         if alpha != 1
-        else -2.0 * torch.log(torch.abs(t)) / PI
+        else -2.0 * torch.log(torch.abs(t)) / M_PI
     )
 
 
 def _Phi_Z1(alpha, t):
     return (
-        torch.tan(PI * alpha / 2)
+        torch.tan(M_PI * alpha / 2)
         if alpha != 1
-        else -2.0 * torch.log(torch.abs(t)) / PI
+        else -2.0 * torch.log(torch.abs(t)) / M_PI
     )
 
 
@@ -72,7 +152,6 @@ def _pdf_single_value_cf_integrate(Phi, x, alpha, beta, **kwds):
     # the only reliable approach to the computation of PDF and CDF of stable RVs is the piecewise integration developed by Nolan1999 and implemented by scipy.stats.levy_stable
     import warnings
     warnings.warn("This method is buggy!", RuntimeWarning)
-    quad_eps = kwds.get("quad_eps", _QUAD_EPS)
 
     # split up integral and use change of variables to project to unit interval
 
@@ -90,8 +169,8 @@ def _pdf_single_value_cf_integrate(Phi, x, alpha, beta, **kwds):
             torch.sin(beta * torch.pow(t, alpha) * Phi(alpha, t))
         )
 
-    transformed_integrand1 = partial(transform_half_real_line_to_unit_interval, integrand1)
-    transformed_integrand2 = partial(transform_half_real_line_to_unit_interval, integrand2)
+    transformed_integrand1 = partial(_transform_half_real_line_to_unit_interval, integrand1)
+    transformed_integrand2 = partial(_transform_half_real_line_to_unit_interval, integrand2)
 
     max_iter = INTEGRATION_REPETITIONS
     vals1 = torch.empty(size=(max_iter, 1))
@@ -105,7 +184,7 @@ def _pdf_single_value_cf_integrate(Phi, x, alpha, beta, **kwds):
     int1 = torch.nanmean(vals1) if not torch.all(torch.isnan(vals1)) else torch.tensor(0.0)
     int2 = torch.nanmean(vals2) if not torch.all(torch.isnan(vals2)) else torch.tensor(0.0)
 
-    return (int1 + int2) / PI
+    return (int1 + int2) / M_PI
 
 _pdf_single_value_cf_integrate_Z0 = partial(_pdf_single_value_cf_integrate, _Phi_Z0)
 _pdf_single_value_cf_integrate_Z1 = partial(_pdf_single_value_cf_integrate, _Phi_Z1)
@@ -118,36 +197,35 @@ def _nolan_round_x_near_zeta(x0, alpha, zeta, x_tol_near_zeta):
 
 
 def _nolan_round_difficult_input(x0, alpha, beta, zeta, x_tol_near_zeta, alpha_tol_near_one):
-    if torch.abs(alpha - 1.) < torch.tensor(alpha_tol_near_one):
+    if torch.abs(alpha - 1.) < alpha_tol_near_one:
         alpha = torch.tensor(1.0)
     x0 = _nolan_round_x_near_zeta(x0, alpha, zeta, x_tol_near_zeta)
     return x0, alpha, beta
 
 
 def _pdf_single_value_piecewise_Z1(x, alpha, beta, **kwds):
-    zeta = -beta * torch.tan(PI * alpha / 2.0)
-    x0 = x + zeta if alpha != torch.tensor(1.) else x
+    zeta = -beta * torch.tan(M_PI * alpha / 2.0)
+    x0 = x + zeta if alpha != 1. else x
     
     return _pdf_single_value_piecewise_Z0(x0, alpha, beta, **kwds)
 
 
 def _pdf_single_value_piecewise_Z0(x0, alpha, beta, **kwds):
-    quad_eps = kwds.get("quad_eps", _QUAD_EPS)
     x_tol_near_zeta = kwds.get("piecewise_x_tol_near_zeta", torch.tensor(0.005))
     alpha_tol_near_one = kwds.get("piecewise_alpha_tol_near_one", torch.tensor(0.005))
 
-    zeta = -beta * torch.tan(PI * alpha / 2.0)
+    zeta = -beta * torch.tan(M_PI * alpha / 2.0)
     x0, alpha, beta = _nolan_round_difficult_input(x0, alpha, beta, zeta, x_tol_near_zeta, alpha_tol_near_one)
 
     if alpha == 2.0:
         def _norm_pdf(x):
-            return torch.exp(-torch.pow(x, 2) / 2.0) / torch.sqrt(2. * PI)
+            return torch.exp(-torch.pow(x, 2) / 2.0) / torch.sqrt(2. * M_PI)
         return _norm_pdf(x0 / torch.sqrt(torch.tensor(2.0))) / torch.sqrt(torch.tensor(2.0))
     elif alpha == 0.5 and beta == 1.0:
         _x = x0 + 1.
         if _x <= 0:
             return torch.tensor(0.0)
-        return torch.tensor(1.0 / torch.sqrt(2.0 * PI * _x) / _x * torch.exp(-1.0 / (2 * _x)))
+        return torch.tensor(1.0 / torch.sqrt(2.0 * M_PI * _x) / _x * torch.exp(-1.0 / (2 * _x)))
     # elif alpha == 0.5 and beta == 0.0 and x0 != 0:
         # S, C = sc.fresnel([1 / np.sqrt(2 * np.pi * np.abs(x0))])
         # arg = 1 / (4 * np.abs(x0))
@@ -156,12 +234,12 @@ def _pdf_single_value_piecewise_Z0(x0, alpha, beta, **kwds):
         # ) / np.sqrt(2 * np.pi * np.abs(x0) ** 3)
         # cannot implement this as fresnel integrals are not available in torch
     elif alpha == 1.0 and beta == 0.0:
-        return 1.0 / (1.0 + torch.pow(x0, 2)) / PI
+        return 1.0 / (1.0 + torch.pow(x0, 2)) / M_PI
     
-    return _pdf_single_value_piecewise_post_rounding_Z0(x0, alpha, beta, quad_eps, x_tol_near_zeta)
+    return _pdf_single_value_piecewise_post_rounding_Z0(x0, alpha, beta, x_tol_near_zeta)
 
 
-def _pdf_single_value_piecewise_post_rounding_Z0(x0, alpha, beta, quad_eps, x_tol_near_zeta):
+def _pdf_single_value_piecewise_post_rounding_Z0(x0, alpha, beta, x_tol_near_zeta):
     _nolan = Nolan(alpha, beta, x0)
     zeta = _nolan.zeta
     xi = _nolan.xi
@@ -174,15 +252,15 @@ def _pdf_single_value_piecewise_post_rounding_Z0(x0, alpha, beta, quad_eps, x_to
         return(
             torch.exp(torch.lgamma(1. + 1./alpha))
             * torch.cos(xi)
-            / PI
+            / M_PI
             / (torch.pow(1. + torch.pow(zeta, 2), (1./alpha/2.)))
         )
     elif x0 < zeta:
         return _pdf_single_value_piecewise_post_rounding_Z0(
-            -x0, alpha, -beta, quad_eps, x_tol_near_zeta
+            -x0, alpha, -beta, x_tol_near_zeta
         )
     
-    if torch.isclose(-xi, PI/2.):
+    if torch.isclose(-xi, M_PI/2.):
         return torch.tensor(0.)
     
 
@@ -201,7 +279,7 @@ def _pdf_single_value_piecewise_post_rounding_Z0(x0, alpha, beta, quad_eps, x_to
         max_iter = INTEGRATION_REPETITIONS_ALPHA_1
         vals = torch.empty(size=(max_iter, 1))
         for i in range(max_iter):
-            intg = integrator.integrate(integrand, dim=1, N=1000, integration_domain=[[-xi, PI/2.]])
+            intg = integrator.integrate(integrand, dim=1, N=1000, integration_domain=[[-xi, M_PI/2.]])
             vals[i] = intg
         intg = torch.nanmean(vals) if not torch.all(torch.isnan(vals)) else torch.tensor(0.0)
 
@@ -209,7 +287,7 @@ def _pdf_single_value_piecewise_post_rounding_Z0(x0, alpha, beta, quad_eps, x_to
         max_iter = INTEGRATION_REPETITIONS
         vals = torch.empty(size=(max_iter, 1))
         for i in range(max_iter):
-            intg = integrator.integrate(integrand, dim=1, **integrator_params, integration_domain=[[-xi, PI/2.]])
+            intg = integrator.integrate(integrand, dim=1, **integrator_params, integration_domain=[[-xi, M_PI/2.]])
             vals[i] = intg
         intg = torch.nanmean(vals) if not torch.all(torch.isnan(vals)) else torch.tensor(0.0)
 
@@ -218,7 +296,7 @@ def _pdf_single_value_piecewise_post_rounding_Z0(x0, alpha, beta, quad_eps, x_to
 
 
 def _cdf_single_value_piecewise_Z1(x, alpha, beta, **kwds):
-    zeta = -beta * torch.tan(PI * alpha / 2.)
+    zeta = -beta * torch.tan(M_PI * alpha / 2.)
     x0 = x + zeta if alpha != 1. else x
 
     return _cdf_single_value_piecewise_Z0(x0, alpha, beta, **kwds)
@@ -226,11 +304,10 @@ def _cdf_single_value_piecewise_Z1(x, alpha, beta, **kwds):
 
 def _cdf_single_value_piecewise_Z0(x0, alpha, beta, **kwds):
     
-    quad_eps = kwds.get("quad_eps", _QUAD_EPS)
     x_tol_near_zeta = kwds.get("piecewise_x_tol_near_zeta", torch.tensor(0.005))
     alpha_tol_near_one = kwds.get("piecewise_alpha_tol_near_one", torch.tensor(0.005))
 
-    zeta = -beta * torch.tan(PI * alpha / 2.)
+    zeta = -beta * torch.tan(M_PI * alpha / 2.)
     x0, alpha, beta = _nolan_round_difficult_input(x0, alpha, beta, zeta, x_tol_near_zeta, alpha_tol_near_one)
 
     if alpha == 2.0:
@@ -241,12 +318,12 @@ def _cdf_single_value_piecewise_Z0(x0, alpha, beta, **kwds):
             return torch.tensor(0.)
         return (1. - torch.erf(torch.sqrt(0.5 / _x)))
     elif alpha == 1.0 and beta == 0.0:
-        return 0.5 + torch.arctan(x0) / PI
+        return 0.5 + torch.arctan(x0) / M_PI
     
-    return _cdf_single_value_piecewise_post_rounding_Z0(x0, alpha, beta, quad_eps, x_tol_near_zeta)
+    return _cdf_single_value_piecewise_post_rounding_Z0(x0, alpha, beta, x_tol_near_zeta)
 
 
-def _cdf_single_value_piecewise_post_rounding_Z0(x0, alpha, beta, quad_eps, x_tol_near_zeta):
+def _cdf_single_value_piecewise_post_rounding_Z0(x0, alpha, beta, x_tol_near_zeta):
     _nolan = Nolan(alpha, beta, x0)
     zeta = _nolan.zeta
     xi = _nolan.xi
@@ -257,11 +334,11 @@ def _cdf_single_value_piecewise_post_rounding_Z0(x0, alpha, beta, quad_eps, x_to
     x0 = _nolan_round_x_near_zeta(x0, alpha, zeta, x_tol_near_zeta)
 
     if (alpha == 1. and beta < 0.) or x0 < zeta:
-        return 1 - _cdf_single_value_piecewise_post_rounding_Z0(-x0, alpha, -beta, quad_eps, x_tol_near_zeta)
+        return 1 - _cdf_single_value_piecewise_post_rounding_Z0(-x0, alpha, -beta, x_tol_near_zeta)
     elif torch.isclose(x0, zeta):
-        return 0.5 - xi / PI
+        return 0.5 - xi / M_PI
     
-    if torch.isclose(-xi, PI/torch.tensor(2.)):
+    if torch.isclose(-xi, M_PI/2.):
         return c1
     
     def integrand(theta):
@@ -269,7 +346,7 @@ def _cdf_single_value_piecewise_post_rounding_Z0(x0, alpha, beta, quad_eps, x_to
         return torch.exp(-g_1)
     
     left_support = -xi
-    right_support = PI / 2.
+    right_support = M_PI / 2.
 
     if alpha > 1.:
         # TODO: i'm not really sure if the purpose of the following optimization is just to reduce the interval of integration lateron. if so, we could probably skip this. needs evaluation
@@ -284,11 +361,11 @@ def _cdf_single_value_piecewise_post_rounding_Z0(x0, alpha, beta, quad_eps, x_to
                 return loss
             for epoch in range(LBFGS_EPOCHS):
                 opt.step(closure=closure)
-            param.clamp(-xi, PI/2.)
+            param.clamp(-xi, M_PI/2.)
             left_support = param
     else: # alpha < 1.
-        if not torch.isclose(integrand(PI/2.), torch.tensor(0.)):
-            param = torch.tensor(PI/2.).requires_grad_(True)
+        if not torch.isclose(integrand(M_PI/2.), torch.tensor(0.)):
+            param = torch.tensor(M_PI/2.).requires_grad_(True)
             opt = torch.optim.LBFGS([param], lr=LBFGS_LR)
             def closure():
                 opt.zero_grad()
@@ -298,7 +375,7 @@ def _cdf_single_value_piecewise_post_rounding_Z0(x0, alpha, beta, quad_eps, x_to
                 return loss
             for epoch in range(LBFGS_EPOCHS):
                 opt.step(closure=closure)
-            param.clamp(-xi, PI/2.)
+            param.clamp(-xi, M_PI/2.)
             right_support = param
 
     # intg = integrator.integrate(integrand, dim=1, **integrator_params, integration_domain=[[left_support, right_support]])
@@ -350,7 +427,6 @@ class Stable(Distribution):
     parametrization = "S1"
     pdf_default_method = "piecewise"
     cdf_default_method = "piecewise"
-    quad_eps = _QUAD_EPS
     piecewise_x_tol_near_zeta = torch.tensor(0.005)
     piecewise_alpha_tol_near_one = torch.tensor(0.005)
 
@@ -382,9 +458,9 @@ class Stable(Distribution):
     
 
     def pdf(self, value: torch.Tensor) -> torch.Tensor:
-        if self.parametrization == "S0":
+        if self._parametrization() == "S0":
             return self._pdf(value, self.alpha, self.beta, self.loc, self.scale)
-        elif self.parametrization == "S1":
+        elif self._parametrization() == "S1":
             alpha = self.alpha
             beta = self.beta
             loc = self.loc
@@ -402,10 +478,10 @@ class Stable(Distribution):
                 for pair in uniq_param_pairs:
                     _alpha, _beta = pair
                     if _alpha == torch.tensor(1.):
-                        _delta = loc + 2*_beta*scale * torch.log(scale) / PI
+                        _delta = loc + 2*_beta*scale * torch.log(scale) / M_PI
                     else:
                         _delta = loc
-                    _delta = (loc + 2*_beta*scale * torch.log(scale) / PI if _alpha==1.0 else loc)
+                    _delta = (loc + 2*_beta*scale * torch.log(scale) / M_PI if _alpha==1.0 else loc)
                     data_mask = torch.all(data_in[:, 1:] == pair, dim=-1)
                     _x = data_in[data_mask, 0]
                     data_out[data_mask] = self._pdf(_x, _alpha, _beta, loc=_delta, scale=scale).reshape(len(_x), 1)
@@ -417,11 +493,11 @@ class Stable(Distribution):
     
 
     def _pdf(self, value, alpha, beta, loc, scale) -> torch.Tensor:
-        if self.parametrization == "S0":
+        if self._parametrization() == "S0":
             _pdf_single_value_piecewise = _pdf_single_value_piecewise_Z0
             _pdf_single_value_cf_integrate = _pdf_single_value_cf_integrate_Z0
             _cf = _cf_Z0
-        elif self.parametrization == "S1":
+        elif self._parametrization() == "S1":
             _pdf_single_value_piecewise = _pdf_single_value_piecewise_Z1
             _pdf_single_value_cf_integrate = _pdf_single_value_cf_integrate_Z1
             _cf = _cf_Z1
@@ -444,7 +520,6 @@ class Stable(Distribution):
             raise ValueError(f"PDF method '{self.pdf_default_method}' not supported")
         
         pdf_single_value_kwds = {
-            "quad_eps": self.quad_eps,
             "piecewise_x_tol_near_zeta": self.piecewise_x_tol_near_zeta,
             "piecewise_alpha_tol_near_one": self.piecewise_alpha_tol_near_one,
         }
@@ -492,7 +567,7 @@ class Stable(Distribution):
                 uniq_param_pairs = torch.unique(data_in[:, 1:], dim = 0)
                 for pair in uniq_param_pairs:
                     _alpha, _beta = pair
-                    _delta = (loc + 2*_beta*scale * torch.log(scale) / PI if _alpha==1.0 else loc)
+                    _delta = (loc + 2*_beta*scale * torch.log(scale) / M_PI if _alpha==1.0 else loc)
                     data_mask = torch.all(data_in[:, 1:] == pair, dim=-1)
                     _x = data_in[data_mask, 0]
                     data_out[data_mask] = self._cdf(_x, _alpha, _beta, loc=_delta, scale=scale).reshape(len(_x), 1)
@@ -504,10 +579,10 @@ class Stable(Distribution):
     
 
     def _cdf(self, value, alpha, beta, loc, scale):
-        if self.parametrization == "S0":
+        if self._parametrization() == "S0":
             _cdf_single_value_piecewise = _cdf_single_value_piecewise_Z0
             _cf = _cf_Z0
-        elif self.parametrization == "S1":
+        elif self._parametrization() == "S1":
             _cdf_single_value_piecewise = _cdf_single_value_piecewise_Z1
             _cf = _cf_Z1
 
@@ -527,7 +602,6 @@ class Stable(Distribution):
             raise ValueError(f"PDF method '{self.pdf_default_method}' not supported")
         
         cdf_single_value_kwds = {
-            "quad_eps": self.quad_eps,
             "piecewise_x_tol_near_zeta": self.piecewise_x_tol_near_zeta,
             "piecewise_alpha_tol_near_one": self.piecewise_alpha_tol_near_one,
         }
