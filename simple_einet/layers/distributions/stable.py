@@ -15,16 +15,21 @@ from c_levyst import Nolan
 
 __all__ = ["Stable"]
 torch.set_default_dtype(torch.double)
+PI = torch.tensor(math.pi)
 # see doc of scipy.stats.levy_stable
 # I tried to stay as close to the original numpy implementation as possible (and kind of sensible)
 _QUAD_EPS = 1e-10
 
+# heavily recommend MonteCarlo here, as the functions are too complex for Simpson/Trapezoid/Boole
 integrator = MonteCarlo()
 integrator_params = {"N": 10000}
-LBFGS_epochs = 20
-LBFGS_lr = 0.1
-MAX_ITER_INTEGRATION_ALPHA_1 = 100
-PI = torch.tensor(math.pi)
+# Parameters for the LBFGS optimization used for determining tighter integration bounds for the CDF computation if alpha > 1.0
+LBFGS_EPOCHS = 20
+LBFGS_LR = 0.1
+# repetitions of all integral computations where alpha != 1.0. the mean over all computations is returned. 1 is sufficient, more increases precision
+INTEGRATION_REPETITIONS = 100
+# repetitions of all integral computations where alpha == 1.0. the mean over all computations is returned. I suggest at least 10
+INTEGRATION_REPETITIONS_ALPHA_1 = 100
 
 
 def transform_half_real_line_to_unit_interval(fct, t):
@@ -88,8 +93,17 @@ def _pdf_single_value_cf_integrate(Phi, x, alpha, beta, **kwds):
     transformed_integrand1 = partial(transform_half_real_line_to_unit_interval, integrand1)
     transformed_integrand2 = partial(transform_half_real_line_to_unit_interval, integrand2)
 
-    int1 = integrator.integrate(transformed_integrand1, dim=1, integration_domain=[[0, 1]], **integrator_params)
-    int2 = integrator.integrate(transformed_integrand2, dim=1, integration_domain=[[0, 1]], **integrator_params)
+    max_iter = INTEGRATION_REPETITIONS
+    vals1 = torch.empty(size=(max_iter, 1))
+    vals2 = torch.empty(size=(max_iter, 1))
+    for i in range(max_iter):
+        int1 = integrator.integrate(transformed_integrand1, dim=1, integration_domain=[[0, 1]], **integrator_params)
+        vals1[i] = int1
+        int2 = integrator.integrate(transformed_integrand2, dim=1, integration_domain=[[0, 1]], **integrator_params)
+        vals2[i] = int2
+
+    int1 = torch.nanmean(vals1) if not torch.all(torch.isnan(vals1)) else torch.tensor(0.0)
+    int2 = torch.nanmean(vals2) if not torch.all(torch.isnan(vals2)) else torch.tensor(0.0)
 
     return (int1 + int2) / PI
 
@@ -184,16 +198,21 @@ def _pdf_single_value_piecewise_post_rounding_Z0(x0, alpha, beta, quad_eps, x_to
         # for alpha==1.0, most samples of the MCIntegrator evaluate to 0, hence we cannot compute the integral
         # repeating and averaging this process over a small number of evaluation nodes (like N=1000) helps! but takes time
         # this is a hacky workaround for the edgecase where alpha==1.0, which should happen quite rarely
-        max_iter = MAX_ITER_INTEGRATION_ALPHA_1
+        max_iter = INTEGRATION_REPETITIONS_ALPHA_1
         vals = torch.empty(size=(max_iter, 1))
         for i in range(max_iter):
             intg = integrator.integrate(integrand, dim=1, N=1000, integration_domain=[[-xi, PI/2.]])
             vals[i] = intg
+        intg = torch.nanmean(vals) if not torch.all(torch.isnan(vals)) else torch.tensor(0.0)
 
-        intg = torch.nanmean(vals)
-        intg = torch.tensor(0.0) if torch.isnan(intg) else intg
     else:
+        max_iter = INTEGRATION_REPETITIONS
+        vals = torch.empty(size=(max_iter, 1))
+        for i in range(max_iter):
             intg = integrator.integrate(integrand, dim=1, **integrator_params, integration_domain=[[-xi, PI/2.]])
+            vals[i] = intg
+        intg = torch.nanmean(vals) if not torch.all(torch.isnan(vals)) else torch.tensor(0.0)
+
 
     return c2 * intg
 
@@ -247,10 +266,6 @@ def _cdf_single_value_piecewise_post_rounding_Z0(x0, alpha, beta, quad_eps, x_to
     
     def integrand(theta):
         g_1 = g(theta)
-        # if not torch.all(torch.isfinite(g_1)):
-        #     g_1 = torch.zeros_like(g_1)
-        # if not torch.all(g_1 >= 0):
-        #     g_1 = torch.zeros_like(g_1)
         return torch.exp(-g_1)
     
     left_support = -xi
@@ -260,28 +275,28 @@ def _cdf_single_value_piecewise_post_rounding_Z0(x0, alpha, beta, quad_eps, x_to
         # TODO: i'm not really sure if the purpose of the following optimization is just to reduce the interval of integration lateron. if so, we could probably skip this. needs evaluation
         if not torch.isclose(integrand(-xi), torch.tensor(0.)):
             param = torch.clone(-xi).detach().requires_grad_(True)
-            opt = torch.optim.LBFGS([param], lr=LBFGS_lr)
+            opt = torch.optim.LBFGS([param], lr=LBFGS_LR)
             def closure():
                 opt.zero_grad()
                 loss = integrand(param)
                 loss.requires_grad_(True)
                 loss.backward()
                 return loss
-            for epoch in range(LBFGS_epochs):
+            for epoch in range(LBFGS_EPOCHS):
                 opt.step(closure=closure)
             param.clamp(-xi, PI/2.)
             left_support = param
     else: # alpha < 1.
         if not torch.isclose(integrand(PI/2.), torch.tensor(0.)):
             param = torch.tensor(PI/2.).requires_grad_(True)
-            opt = torch.optim.LBFGS([param], lr=LBFGS_lr)
+            opt = torch.optim.LBFGS([param], lr=LBFGS_LR)
             def closure():
                 opt.zero_grad()
                 loss = integrand(param)
                 loss.requires_grad_(True)
                 loss.backward()
                 return loss
-            for epoch in range(LBFGS_epochs):
+            for epoch in range(LBFGS_EPOCHS):
                 opt.step(closure=closure)
             param.clamp(-xi, PI/2.)
             right_support = param
@@ -291,17 +306,20 @@ def _cdf_single_value_piecewise_post_rounding_Z0(x0, alpha, beta, quad_eps, x_to
         # for alpha==1.0, most samples of the MCIntegrator evaluate to 0, hence we cannot compute the integral
         # repeating and averaging this process over a small number of evaluation nodes (like N=1000) helps! but takes time
         # this is a hacky workaround for the edgecase where alpha==1.0, which should happen quite rarely
-        max_iter = MAX_ITER_INTEGRATION_ALPHA_1
+        max_iter = INTEGRATION_REPETITIONS_ALPHA_1
         vals = torch.empty(size=(max_iter, 1))
         for i in range(max_iter):
             intg = integrator.integrate(integrand, dim=1, N=1000, integration_domain=[[left_support, right_support]])
             vals[i] = intg
-
-        intg = torch.nanmean(vals)
-        intg = torch.tensor(0.0) if torch.isnan(intg) else intg
+        intg = torch.nanmean(vals) if not torch.all(torch.isnan(vals)) else torch.tensor(0.0)
+    
     else:
+        max_iter = INTEGRATION_REPETITIONS
+        vals = torch.empty(size=(max_iter, 1))
+        for i in range(max_iter):
             intg = integrator.integrate(integrand, dim=1, **integrator_params, integration_domain=[[left_support, right_support]])
-
+            vals[i] = intg
+        intg = torch.nanmean(vals) if not torch.all(torch.isnan(vals)) else torch.tensor(0.0)
 
     return c1 + c3 * intg
 
