@@ -6,7 +6,7 @@ import torch
 from torch import distributions as dist
 from torch.distributions import constraints, Distribution
 from torch.distributions.utils import broadcast_all
-from torchquad import MonteCarlo
+from torchquad import MonteCarlo, VEGAS
 from c_levyst import Nolan
 
 # I think this can be improved a lot
@@ -20,9 +20,10 @@ torch.set_default_dtype(torch.double)
 _QUAD_EPS = 1e-10
 
 integrator = MonteCarlo()
-integrator_params = {"N": 1000}
+integrator_params = {"N": 10000}
 LBFGS_epochs = 20
 LBFGS_lr = 0.1
+MAX_ITER_INTEGRATION_ALPHA_1 = 100
 PI = torch.tensor(math.pi)
 
 
@@ -103,7 +104,7 @@ def _nolan_round_x_near_zeta(x0, alpha, zeta, x_tol_near_zeta):
 
 
 def _nolan_round_difficult_input(x0, alpha, beta, zeta, x_tol_near_zeta, alpha_tol_near_one):
-    if torch.abs(alpha - 1) < alpha_tol_near_one:
+    if torch.abs(alpha - 1.) < torch.tensor(alpha_tol_near_one):
         alpha = torch.tensor(1.0)
     x0 = _nolan_round_x_near_zeta(x0, alpha, zeta, x_tol_near_zeta)
     return x0, alpha, beta
@@ -111,7 +112,7 @@ def _nolan_round_difficult_input(x0, alpha, beta, zeta, x_tol_near_zeta, alpha_t
 
 def _pdf_single_value_piecewise_Z1(x, alpha, beta, **kwds):
     zeta = -beta * torch.tan(PI * alpha / 2.0)
-    x0 = x + zeta if alpha != 1 else x
+    x0 = x + zeta if alpha != torch.tensor(1.) else x
     
     return _pdf_single_value_piecewise_Z0(x0, alpha, beta, **kwds)
 
@@ -173,15 +174,26 @@ def _pdf_single_value_piecewise_post_rounding_Z0(x0, alpha, beta, quad_eps, x_to
 
     def integrand(theta):
         g_1 = g(theta)
-        if not torch.all(torch.isfinite(g_1)):
-            g_1 = torch.zeros_like(g_1)
-        if not torch.all(g_1 >= 0):
-            g_1 = torch.zeros_like(g_1)
+        g_1.nan_to_num(posinf=0.0)
+        g_1[g_1 < 0] = 0.0
         return g_1 * torch.exp(-g_1)
     
     # bisect and np.quad (which is quasi Fortran's quadpack) are not available
     # instead integrate with MonteCarlo and hope for the best
-    intg = integrator.integrate(integrand, dim=1, **integrator_params, integration_domain=[[-xi, PI/2.]])
+    if alpha == 1.0:
+        # for alpha==1.0, most samples of the MCIntegrator evaluate to 0, hence we cannot compute the integral
+        # repeating and averaging this process over a small number of evaluation nodes (like N=1000) helps! but takes time
+        # this is a hacky workaround for the edgecase where alpha==1.0, which should happen quite rarely
+        max_iter = MAX_ITER_INTEGRATION_ALPHA_1
+        vals = torch.empty(size=(max_iter, 1))
+        for i in range(max_iter):
+            intg = integrator.integrate(integrand, dim=1, N=1000, integration_domain=[[-xi, PI/2.]])
+            vals[i] = intg
+
+        intg = torch.nanmean(vals)
+        intg = torch.tensor(0.0) if torch.isnan(intg) else intg
+    else:
+            intg = integrator.integrate(integrand, dim=1, **integrator_params, integration_domain=[[-xi, PI/2.]])
 
     return c2 * intg
 
@@ -235,10 +247,10 @@ def _cdf_single_value_piecewise_post_rounding_Z0(x0, alpha, beta, quad_eps, x_to
     
     def integrand(theta):
         g_1 = g(theta)
-        if not torch.all(torch.isfinite(g_1)):
-            g_1 = torch.zeros_like(g_1)
-        if not torch.all(g_1 >= 0):
-            g_1 = torch.zeros_like(g_1)
+        # if not torch.all(torch.isfinite(g_1)):
+        #     g_1 = torch.zeros_like(g_1)
+        # if not torch.all(g_1 >= 0):
+        #     g_1 = torch.zeros_like(g_1)
         return torch.exp(-g_1)
     
     left_support = -xi
@@ -274,7 +286,22 @@ def _cdf_single_value_piecewise_post_rounding_Z0(x0, alpha, beta, quad_eps, x_to
             param.clamp(-xi, PI/2.)
             right_support = param
 
-    intg = integrator.integrate(integrand, dim=1, **integrator_params, integration_domain=[[left_support, right_support]])
+    # intg = integrator.integrate(integrand, dim=1, **integrator_params, integration_domain=[[left_support, right_support]])
+    if alpha == 1.0:
+        # for alpha==1.0, most samples of the MCIntegrator evaluate to 0, hence we cannot compute the integral
+        # repeating and averaging this process over a small number of evaluation nodes (like N=1000) helps! but takes time
+        # this is a hacky workaround for the edgecase where alpha==1.0, which should happen quite rarely
+        max_iter = MAX_ITER_INTEGRATION_ALPHA_1
+        vals = torch.empty(size=(max_iter, 1))
+        for i in range(max_iter):
+            intg = integrator.integrate(integrand, dim=1, N=1000, integration_domain=[[left_support, right_support]])
+            vals[i] = intg
+
+        intg = torch.nanmean(vals)
+        intg = torch.tensor(0.0) if torch.isnan(intg) else intg
+    else:
+            intg = integrator.integrate(integrand, dim=1, **integrator_params, integration_domain=[[left_support, right_support]])
+
 
     return c1 + c3 * intg
 
@@ -356,6 +383,10 @@ class Stable(Distribution):
                 uniq_param_pairs = torch.unique(data_in[:, 1:], dim = 0)
                 for pair in uniq_param_pairs:
                     _alpha, _beta = pair
+                    if _alpha == torch.tensor(1.):
+                        _delta = loc + 2*_beta*scale * torch.log(scale) / PI
+                    else:
+                        _delta = loc
                     _delta = (loc + 2*_beta*scale * torch.log(scale) / PI if _alpha==1.0 else loc)
                     data_mask = torch.all(data_in[:, 1:] == pair, dim=-1)
                     _x = data_in[data_mask, 0]
@@ -539,6 +570,9 @@ if __name__ == "__main__":
         x.sort()
         data = torch.tensor(x)
 
+        print("Params: ")
+        print(params)
+
         results = {"data": data}
 
         torch_densities = torch_stable.pdf(data)
@@ -549,7 +583,4 @@ if __name__ == "__main__":
         results["t-CDF"] = torch_probs
         scipy_probs = scipy_stable.cdf(data)
         results["s-CDF"] = scipy_probs
-
-        print("Params: ")
-        print(params)
         print(tabulate(results, headers="keys"))

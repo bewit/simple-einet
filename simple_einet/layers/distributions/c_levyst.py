@@ -64,9 +64,11 @@ class Nolan:
     
     def g_alpha_eq_one(self, theta: torch.Tensor) -> torch.Tensor: 
         if torch.all(torch.isclose(theta, -self.xi)):
-            return torch.tensor(0.)
-        if torch.all(torch.isclose(theta, M_PI_2.type(theta.dtype))):
-            return torch.tensor(float('inf'))
+            return torch.zeros_like(theta)
+        if torch.all(theta == M_PI_2.type(theta.dtype)):
+            temp = torch.zeros_like(theta)
+            temp.fill_(float('inf'))
+            return temp
         
         return (
             (1. + theta * self.two_beta_div_pi)
