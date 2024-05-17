@@ -1,10 +1,12 @@
 from simple_einet.sampling_utils import SamplingContext
+from simple_einet.einet import Einet, EinetConfig
 import torch
 from torch import nn
 from torch.distributions.distribution import Distribution
 
 from simple_einet.layers.distributions.abstract_leaf import AbstractLeaf
-from stable_distribution import TorchStable
+from simple_einet.layers.distributions.stable_distribution import TorchStable
+
 
 class Stable(AbstractLeaf):
     """Alphastable layer"""
@@ -23,6 +25,7 @@ class Stable(AbstractLeaf):
         _beta = torch.rand(1, num_channels, num_features, num_leaves, num_repetitions)
         _loc = torch.randn(1, num_channels, num_features, num_leaves, num_repetitions)
         _scale = torch.rand(1, num_channels, num_features, num_leaves, num_repetitions)
+
         self.alpha = nn.Parameter(_alpha)
         self.beta = nn.Parameter(_beta)
         self.loc = nn.Parameter(_loc)
@@ -32,34 +35,36 @@ class Stable(AbstractLeaf):
     def _get_base_distribution(self, ctx: SamplingContext = None) -> Distribution:
         # transformation to euclidian space
         _alpha = 2. / (1. + torch.exp(-self.alpha))
-        _beta = 2. / (1. + torch.exp(-self.beta))
+        _beta = 2. / (1. + torch.exp(-self.beta)) - 1.0
         _loc = self.loc
         _scale = torch.exp(self.scale)
+
         return TorchStable(alpha=_alpha, beta=_beta, loc=_loc, scale=_scale)
     
 
 
 if __name__ == "__main__":
-    from simple_einet.einet import Einet, EinetConfig
-    from simple_einet.einet_mixture import EinetMixture
-    from sklearn.datasets import make_blobs
 
     device = "cpu"
 
-    n = 1000
-    n_vars = 2
-    centers = [[-5, -5], [5, 5]]
-    data, _ = make_blobs(n_samples=n, n_features=2, centers=centers)
-    data = torch.tensor(data).to(device)
+    # Input dimensions
+    in_features = 4
+    batchsize = 10
 
+    # Create input sample
+    x = torch.randn(batchsize, in_features)
 
-    num_features = 4
-    num_channels = data.shape[0]
-    depth = 2
-    num_sums = 2
+    x = torch.zeros((batchsize, in_features))
+
+    print(x)
+
+    num_features = in_features
     num_channels = 1
-    num_leaves = 3
-    num_repetitions = 3
+    depth = 1
+    num_sums = 1
+    num_channels = 1
+    num_leaves = 1
+    num_repetitions = 1
     num_classes = 1
     dropout = 0.0
     leaf_type = Stable
@@ -81,6 +86,7 @@ if __name__ == "__main__":
 
     model = Einet(config)
     
-    lls = model(data)
+    lls = model(x)
 
     print(lls)
+    print(torch.exp(lls))

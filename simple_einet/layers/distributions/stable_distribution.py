@@ -611,16 +611,19 @@ class TorchStable(Distribution):
             if torch.all(torch.reshape(self.alpha, (1, -1))[0, :] != 1.):
                 return self._pdf(value, alpha, beta, loc, scale)
             else:
-                value = torch.reshape(value, (1, -1))[0, :]
-                value, alpha, beta = broadcast_all(value, alpha, beta)
+                value_shape = value.shape
+                uniq_param_pairs = torch.cat((alpha.reshape(-1, 1), beta.reshape(-1, 1)), dim=-1)
 
+                value, alpha, beta = broadcast_all(value, alpha, beta)
+                value = torch.reshape(value, (1, -1))[0, :]
+                alpha = torch.reshape(alpha, (1, -1))[0, :]
+                beta = torch.reshape(beta, (1, -1))[0, :]
                 data_in = torch.dstack((value, alpha, beta))[0]
                 data_out = torch.empty(size=(len(data_in), 1))
 
-                uniq_param_pairs = torch.unique(data_in[:, 1:], dim = 0)
                 for pair in uniq_param_pairs:
                     _alpha, _beta = pair
-                    if _alpha == torch.tensor(1.):
+                    if _alpha == 1.:
                         _delta = loc + 2*_beta*scale * torch.log(scale) / M_PI
                     else:
                         _delta = loc
@@ -629,10 +632,11 @@ class TorchStable(Distribution):
                     _x = data_in[data_mask, 0]
                     data_out[data_mask] = self._pdf(_x, _alpha, _beta, loc=_delta, scale=scale).reshape(len(_x), 1)
 
-                output = data_out.T[0]
-                if output.shape == (1,):
-                    return output[0]
-                return output
+                data_out = torch.reshape(data_out, value_shape) 
+
+                return data_out       
+
+
     
 
     def _pdf(self, value, alpha, beta, loc, scale) -> torch.Tensor:
@@ -644,15 +648,6 @@ class TorchStable(Distribution):
             _pdf_single_value_piecewise = _pdf_single_value_piecewise_Z1
             _pdf_single_value_cf_integrate = _pdf_single_value_cf_integrate_Z1
             _cf = _cf_Z1
-        
-        value = torch.reshape(value, (1, -1))[0, :]
-        # standardize
-        value = (value - loc) / scale
-
-        value, alpha, beta = broadcast_all(value, alpha, beta)
-
-        data_in = torch.dstack((value, alpha, beta))[0]
-        data_out = torch.empty(size=(len(data_in), 1))
 
         pdf_default_method_name = self.pdf_default_method
         if pdf_default_method_name in ("piecewise", "best", "zolotarev"):
@@ -667,9 +662,30 @@ class TorchStable(Distribution):
             "piecewise_alpha_tol_near_one": self.piecewise_alpha_tol_near_one,
         }
 
-        # no fft support (by now)
+        # retrieve original shape for reshaping lateron
+        value_shape = value.shape
+        # standardize
+        value = (value - loc) / scale
+         
+        uniq_param_pairs = torch.cat((alpha.reshape(-1, 1), beta.reshape(-1, 1)), dim=-1)
+        # print("uniq_param_pairs", uniq_param_pairs.shape)
 
-        uniq_param_pairs = torch.unique(data_in[:, 1:], dim=0)
+        value, alpha, beta = broadcast_all(value, alpha, beta)
+        # print("value", value.shape)
+        # print("alpha", alpha.shape)
+        # print("beta", beta.shape)
+        value = torch.reshape(value, (1, -1))[0, :]
+        alpha = torch.reshape(alpha, (1, -1))[0, :]
+        beta = torch.reshape(beta, (1, -1))[0, :]
+        # print("value", value.shape)
+        # print("alpha", alpha.shape)
+        # print("beta", beta.shape)
+        data_in = torch.dstack((value, alpha, beta))[0]
+        # print("data_in", data_in.shape)
+        # print(data_in)
+        data_out = torch.empty(size=(len(data_in), 1))
+
+        # uniq_param_pairs = torch.unique(data_in[:, 1:], dim=0)
         for pair in uniq_param_pairs:
             data_mask = torch.all(data_in[:, 1:] == pair, dim=-1)
             data_subset = data_in[data_mask]
@@ -680,10 +696,54 @@ class TorchStable(Distribution):
                 ]
             ).reshape(len(data_subset), 1)
 
+        # reshape to original tensor
+        data_out = torch.reshape(data_out, value_shape)        
         # account for standardization
         data_out = data_out / scale
 
-        return data_out.T[0]
+        return data_out
+
+        
+        # # standardize
+        # value = (value - loc) / scale
+        # # value = torch.reshape(value, (1, -1))[0, :].T
+
+        # print(value.shape)
+        # print(alpha.shape)
+        # print(beta.shape)
+
+        # value, alpha, beta = broadcast_all(value, alpha, beta)
+        # print(value.shape)
+        # print(alpha.shape)
+        # print(beta.shape)
+        # data_in = torch.stack((value, alpha, beta))
+        # print(data_in.shape)
+        # # data_out = torch.empty(size=(len(data_in), 1))
+        # data_out = torch.empty_like(value)
+
+
+        # # uniq_param_pairs = torch.unique(data_in[1:, ...], dim=0)
+        # # print(uniq_param_pairs)
+        # # print(uniq_param_pairs.shape)
+        # # for pair in uniq_param_pairs:
+        #     # data_mask = torch.all(data_in[:, 1:] == pair, dim=-1)
+        #     # data_subset = data_in[data_mask]
+        # data_subset = data_in
+        # # data_out[data_mask] 
+        # # data_out = torch.tensor(
+        # #     [
+        # #         pdf_single_value_method(_value, _alpha, _beta, **pdf_single_value_kwds)
+        # #         for _value, _alpha, _beta in data_subset
+        # #     ]
+        # # ).reshape(len(data_subset), 1)
+        # data_out = torch.tensor(pdf_single_value_method(value, alpha, beta, **pdf_single_value_kwds))
+
+        # # account for standardization
+        # data_out = data_out / scale
+
+        # return data_out.T[0]
+
+
 
 
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
@@ -820,11 +880,15 @@ if __name__ == "__main__":
         results = {"data": data}
 
         torch_densities = torch_stable.pdf(data)
+        # print(torch_densities)
         results["t-PDF"] = torch_densities
         scipy_densities = scipy_stable.pdf(data)
+        # print(scipy_densities)
         results["s-PDF"] = scipy_densities
         torch_probs = torch_stable.cdf(data)
         results["t-CDF"] = torch_probs
+        # print(torch_probs)
         scipy_probs = scipy_stable.cdf(data)
         results["s-CDF"] = scipy_probs
+        # print(scipy_probs)
         print(tabulate(results, headers="keys"))
