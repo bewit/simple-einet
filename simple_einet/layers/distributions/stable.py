@@ -1,3 +1,4 @@
+from simple_einet.layers.distributions.normal import Normal
 from simple_einet.sampling_utils import SamplingContext
 from simple_einet.einet import Einet, EinetConfig
 import torch
@@ -26,6 +27,14 @@ class Stable(AbstractLeaf):
         _loc = torch.randn(1, num_channels, num_features, num_leaves, num_repetitions)
         _scale = torch.rand(1, num_channels, num_features, num_leaves, num_repetitions)
 
+
+        # to DEBUG, set all parameters to the normal distribution
+        # _alpha = torch.zeros(1, num_channels, num_features, num_leaves, num_repetitions) + 1.9
+        # _beta = torch.zeros(1, num_channels, num_features, num_leaves, num_repetitions) + 0.1
+        # _loc = torch.zeros(1, num_channels, num_features, num_leaves, num_repetitions)
+        # _scale = torch.ones(1, num_channels, num_features, num_leaves, num_repetitions) / torch.sqrt(torch.tensor(2.0))
+
+
         self.alpha = nn.Parameter(_alpha)
         self.beta = nn.Parameter(_beta)
         self.loc = nn.Parameter(_loc)
@@ -39,32 +48,45 @@ class Stable(AbstractLeaf):
         _loc = self.loc
         _scale = torch.exp(self.scale)
 
+        # to DEBUG, don't transform parameters already defined as the normal distribution in the constructor
+        # _alpha = self.alpha
+        # _beta = self.beta
+        # _loc = self.loc
+        # _scale = self.scale
+
+
         return TorchStable(alpha=_alpha, beta=_beta, loc=_loc, scale=_scale)
     
 
 
 if __name__ == "__main__":
 
-    device = "cpu"
+    device = "cuda"
+    torch.set_default_device(device)
 
     # Input dimensions
     in_features = 4
-    batchsize = 10
+    batchsize = 2
 
     # Create input sample
     x = torch.randn(batchsize, in_features)
-
     x = torch.zeros((batchsize, in_features))
+    x = torch.tensor([
+        [-4., -3., -2., -1.], 
+        [-0.5, -0.3, -0.2, -0.1],
+        [0.0, 0.0, 0.0, 0.0], 
+        [0.1, 0.2, 0.3, 0.5],  
+        [1., 2., 3., 4.], 
+    ])
 
     print(x)
 
     num_features = in_features
     num_channels = 1
     depth = 1
-    num_sums = 1
-    num_channels = 1
-    num_leaves = 1
-    num_repetitions = 1
+    num_sums = 2
+    num_leaves = 2
+    num_repetitions = 2
     num_classes = 1
     dropout = 0.0
     leaf_type = Stable
@@ -85,8 +107,11 @@ if __name__ == "__main__":
     )
 
     model = Einet(config)
-    
-    lls = model(x)
 
+    lls = model(x)
     print(lls)
     print(torch.exp(lls))
+
+    log_cdfs = model.log_cdf(x)
+    print(log_cdfs)
+    print(torch.exp(log_cdfs))

@@ -41,6 +41,32 @@ def dist_forward(distribution, x: torch.Tensor):
     return x
 
 
+def dist_cdf(distribution, x: torch.Tensor):
+    """
+    Computation of the CDF w.r.t. x of an arbitrary PyTorch distribution.
+
+    Args:
+        distribution: PyTorch base distribution which is used to compute the probability of x w.r.t. the CDF.
+        x: Input to compute the probability of.
+           Shape [n, d].
+
+    Returns:
+        torch.Tensor: Probabilities for each feature.
+    """
+    if x.dim() == 3:  # [N, C, D]
+        x = x.unsqueeze(-1).unsqueeze(-1)  # [N, C, D, 1, 1]
+
+    # Compute log-likelihodd
+    try:
+        x = distribution.cdf(x)  # Shape: [n, d, oc, r]
+    except ValueError as e:
+        print("min:", x.min())
+        print("max:", x.max())
+        raise e
+
+    return x
+
+
 def dist_mode(distribution: dist.Distribution, ctx: SamplingContext = None) -> torch.Tensor:
     """
     Get the mode of a given distribution.
@@ -262,6 +288,39 @@ class AbstractLeaf(AbstractLayer, ABC):
         x = self._marginalize_input(x, marginalized_scopes)
 
         return x
+    
+
+    def log_cdf(self, x, marginalized_scopes: List[int]):
+        """
+        Computation of the log of the cumulative distribution function.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+            marginalized_scopes (List[int]): List of scopes to marginalize.
+
+        Returns:
+            torch.Tensor: Output tensor after marginalization.
+        """
+        # Forward through base distribution
+        d = self._get_base_distribution()
+        nan_mask = torch.isnan(x)
+        if nan_mask.any():
+            # Replace nans with some valid value
+            x = torch.where(torch.isnan(x), self.nan_placeholder, x)
+
+        # Perform forward pass
+        x = dist_cdf(d, x)
+
+        # Set back to nan
+        if nan_mask.any():
+            x[nan_mask] = torch.nan
+
+        x = self._marginalize_input(x, marginalized_scopes)
+
+        x = torch.log(x)
+
+        return x
+
 
     @abstractmethod
     def _get_base_distribution(self, ctx: SamplingContext = None) -> dist.Distribution:

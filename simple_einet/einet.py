@@ -145,6 +145,61 @@ class Einet(nn.Module):
 
         return x
 
+
+    def log_cdf(self, x: torch.Tensor, marginalized_scopes: torch.Tensor = None) -> torch.Tensor:
+        """
+        Log cdf inference pass for the Einet model.
+
+        Args:
+          x (torch.Tensor): Input data of shape [N, C, D], where C is the number of input channels (useful for images) and D is the number of features/random variables (H*W for images).
+          marginalized_scopes: torch.Tensor:  (Default value = None)
+
+        Returns:
+            Probability tensor of the input: p(X) or p(X | C) if number of classes > 1.
+        """
+
+        # Add channel dimension if not present
+        if x.dim() == 2:  # [N, D]
+            x = x.unsqueeze(1)
+
+        if x.dim() == 4:  # [N, C, H, W]
+            x = x.view(x.shape[0], self.config.num_channels, -1)
+
+        assert x.dim() == 3
+        assert (
+            x.shape[1] == self.config.num_channels
+        ), f"Number of channels in input ({x.shape[1]}) does not match number of channels specified in config ({self.config.num_channels})."
+        assert (
+                x.shape[2] == self.config.num_features
+        ), f"Number of features in input ({x.shape[0]}) does not match number of features specified in config ({self.config.num_features})."
+
+        # Apply leaf distributions (replace marginalization indicators with 0.0 first)
+        x = self.leaf.log_cdf(x, marginalized_scopes)
+
+        # Pass through intermediate layers
+        x = self._forward_layers(x)
+
+        # Merge results from the different repetitions into the channel dimension
+        batch_size, features, channels, repetitions = x.size()
+        assert features == 1  # number of features should be 1 at this point
+        assert channels == self.config.num_classes
+
+        # If model has multiple reptitions, perform repetition mixing
+        if self.config.num_repetitions > 1:
+            # Mix repetitions
+            x = self.mixing(x)
+        else:
+            # Remove repetition index
+            x = x.squeeze(-1)
+
+        # Remove feature dimension
+        x = x.squeeze(1)
+
+        # Final shape check
+        assert x.shape == (batch_size, self.config.num_classes)
+
+        return x
+
     def _forward_layers(self, x):
         """
         Forward pass through the inner sum and product layers.

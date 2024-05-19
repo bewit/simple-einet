@@ -34,6 +34,13 @@ class Normal(AbstractLeaf):
         self.means = nn.Parameter(torch.randn(1, num_channels, num_features, num_leaves, num_repetitions))
         self.log_stds = nn.Parameter(torch.rand(1, num_channels, num_features, num_leaves, num_repetitions))
 
+
+        # to DEBUG, default to standard normal distribution
+        self.means = nn.Parameter(torch.zeros(1, num_channels, num_features, num_leaves, num_repetitions))
+        self.log_stds = nn.Parameter(torch.zeros(1, num_channels, num_features, num_leaves, num_repetitions))
+
+
+
     def _get_base_distribution(self, ctx: SamplingContext = None):
         return dist.Normal(loc=self.means, scale=self.log_stds.exp())
 
