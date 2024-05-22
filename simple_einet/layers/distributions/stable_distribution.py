@@ -669,21 +669,13 @@ class TorchStable(Distribution):
         value = (value - loc) / scale
          
         uniq_param_pairs = torch.cat((alpha.reshape(-1, 1), beta.reshape(-1, 1)), dim=-1)
-        # print("uniq_param_pairs", uniq_param_pairs.shape)
 
         value, alpha, beta = broadcast_all(value, alpha, beta)
-        # print("value", value.shape)
-        # print("alpha", alpha.shape)
-        # print("beta", beta.shape)
         value = torch.reshape(value, (1, -1))[0, :]
         alpha = torch.reshape(alpha, (1, -1))[0, :]
         beta = torch.reshape(beta, (1, -1))[0, :]
-        # print("value", value.shape)
-        # print("alpha", alpha.shape)
-        # print("beta", beta.shape)
+
         data_in = torch.dstack((value, alpha, beta))[0]
-        # print("data_in", data_in.shape)
-        # print(data_in)
         data_out = torch.empty(size=(len(data_in), 1))
 
         # uniq_param_pairs = torch.unique(data_in[:, 1:], dim=0)
@@ -819,6 +811,18 @@ if __name__ == "__main__":
     from scipy.stats import levy_stable
     from tabulate import tabulate
 
+    
+    if torch.cuda.is_available():
+        device = "cuda"
+    else:
+        device = "cpu"
+    print(f"Torch current device: {device}")
+    torch.set_default_device(device)
+
+
+    # qualitative analysis
+    print("=============== Test ===============")
+
     params_set = [
         {"alpha": 2.0, "beta": 0.0, "loc": 0.0, "scale": 1./np.sqrt(2.)},
         {"alpha": 1.5, "beta": 0.5, "loc": 0.0, "scale": 1.0},
@@ -844,23 +848,87 @@ if __name__ == "__main__":
         logvals = np.logspace(-5, 5, 11)
         x = list((-1) * logvals) + list(logvals)
         x.sort()
-        data = torch.tensor(x)
+        data = x
 
         print("Params: ")
         print(params)
 
         results = {"data": data}
 
-        torch_densities = torch_stable.pdf(data)
+        torch_densities = torch_stable.pdf(torch.tensor(data))
         # print(torch_densities)
         results["t-PDF"] = torch_densities
         scipy_densities = scipy_stable.pdf(data)
         # print(scipy_densities)
         results["s-PDF"] = scipy_densities
-        torch_probs = torch_stable.cdf(data)
+        torch_probs = torch_stable.cdf(torch.tensor(data))
         results["t-CDF"] = torch_probs
         # print(torch_probs)
         scipy_probs = scipy_stable.cdf(data)
         results["s-CDF"] = scipy_probs
         # print(scipy_probs)
         print(tabulate(results, headers="keys"))
+
+
+
+    # timing
+    import timeit
+    from functools import partial
+    from torch.distributions import Normal
+    from scipy.stats import norm
+    from torch.utils import benchmark 
+    from rtpt import RTPT
+
+
+    print("=============== Timing ===============")
+    max_iter = len(params_set)
+    rtpt = RTPT(name_initials="BW", experiment_name="TorchStable distribution benchmarking", max_iterations=max_iter)
+    rtpt.start()
+
+    for i, params in enumerate(params_set):
+        alpha = params["alpha"]
+        beta = params["beta"]
+        loc = params["loc"]
+        scale = params["scale"]
+
+        print("Params:")
+        print(params)
+
+        #torch_stable = TorchStable(alpha=torch.tensor(alpha), beta=torch.tensor(beta), loc=torch.tensor(loc), scale=torch.tensor(scale))
+        torch_stable_setup = "from __main__ import TorchStable \ntorch_stable = TorchStable(torch.tensor(alpha), torch.tensor(beta), torch.tensor(loc), torch.tensor(scale))"
+        scipy_stable = levy_stable(alpha=alpha, beta=beta, loc=loc, scale=scale)
+
+        n = 100
+        vals = np.random.random((n, 1))
+        torch_vals = torch.tensor(vals)
+
+        repeats = 5
+        number = 1000
+        # torch_time_pdf = timeit.Timer(partial(torch_stable.pdf, torch_vals)).repeat(repeat=repeats, number=number)
+        torch_time_pdf = benchmark.Timer(stmt="torch_stable.pdf(x)", setup=torch_stable_setup, globals={"alpha": alpha, "beta": beta, "loc": loc, "scale": scale, "x": torch_vals})
+        print(torch_time_pdf.timeit(number))
+        scipy_time_pdf = min(timeit.Timer(partial(scipy_stable.pdf, vals)).repeat(repeat=repeats, number=number)) / number
+        print(f"Scipy stable PDF: {scipy_time_pdf} seconds")
+        torch_time_cdf = benchmark.Timer(stmt="torch_stable.cdf(x)", setup=torch_stable_setup, globals={"alpha": alpha, "beta": beta, "loc": loc, "scale": scale, "x": torch_vals})
+        print(torch_time_cdf.timeit(number))
+        scipy_time_cdf = min(timeit.Timer(partial(scipy_stable.cdf, vals)).repeat(repeat=repeats, number=number)) / number
+        print(f"Scipy stable CDF: {scipy_time_cdf} seconds")
+
+
+        if alpha == 2.0:
+            # torch_normal = Normal(loc=torch.tensor(loc), scale=torch.tensor(scale * np.sqrt(2.)))
+            torch_normal_setup = """from torch.distributions import Normal \nnormal = Normal(loc=torch.tensor(loc), scale=torch.tensor(scale))"""
+            scipy_normal = norm(loc=loc, scale=scale*np.sqrt(2.))
+
+
+            torch_normal_time_pdf = benchmark.Timer(stmt="torch.exp(normal.log_prob(x))", setup=torch_normal_setup, globals={"loc": loc, "scale": scale, "x": torch_vals})
+            print(torch_normal_time_pdf.timeit(number))            
+            scipy_normal_time_pdf = min(timeit.Timer(partial(scipy_normal.pdf, vals)).repeat(repeat=repeats, number=number)) / number
+            print(f"Scipy normal PDF: {scipy_normal_time_pdf} seconds")
+            torch_normal_time_cdf = benchmark.Timer(stmt="normal.cdf(x)", setup=torch_normal_setup, globals={"loc": loc, "scale": scale, "x": torch_vals})
+            print(torch_normal_time_cdf.timeit(number))
+            scipy_normal_time_cdf = min(timeit.Timer(partial(scipy_normal.cdf, vals)).repeat(repeat=repeats, number=number)) / number
+            print(f"Scipy normal CDF: {scipy_normal_time_cdf} seconds")
+
+
+        rtpt.step(f"{i+1}/{max_iter}")
