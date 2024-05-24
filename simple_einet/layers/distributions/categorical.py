@@ -32,3 +32,12 @@ class Categorical(AbstractLeaf):
     def _get_base_distribution(self, ctx: SamplingContext = None):
         # Use sigmoid to ensure, that probs are in valid range
         return dist.Categorical(logits=F.log_softmax(self.logits, dim=-1))
+    
+
+    def log_characteristic_function(self, t: torch.Tensor) -> torch.Tensor:
+        probs = F.log_softmax(self.logits, dim=-1)
+
+        indices = torch.arange(1, )
+        
+        torch.exp(1j * indices * t)
+

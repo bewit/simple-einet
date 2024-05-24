@@ -327,6 +327,12 @@ class AbstractLeaf(AbstractLayer, ABC):
         """Get the underlying torch distribution."""
         pass
 
+
+    @abstractmethod
+    def log_characteristic_function(self, t: torch.Tensor) -> torch.Tensor:
+        pass
+
+
     def sample(self, ctx: SamplingContext) -> torch.Tensor:
         """
         Sample from the distribution represented by this leaf node.

@@ -43,6 +43,14 @@ class Normal(AbstractLeaf):
 
     def _get_base_distribution(self, ctx: SamplingContext = None):
         return dist.Normal(loc=self.means, scale=self.log_stds.exp())
+    
+
+    def log_characteristic_function(self, t: torch.Tensor): 
+        loc = self.means
+        scale = self.log_stds.exp()
+
+        result = 1j * t * loc - 0.5 * torch.pow(scale, 2) * torch.pow(t, 2)
+        return result
 
 
 class RatNormal(AbstractLeaf):
