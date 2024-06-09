@@ -71,25 +71,10 @@ class Stable(AbstractLeaf):
 
 
 if __name__ == "__main__":
-
     device = "cuda"
     torch.set_default_device(device)
 
-    # test log_characteristic_function
-    num_features = 2
-    batchsize = 2
-    t = torch.zeros(batchsize, num_features)
-
-    num_channels = 1
-    num_leaves = 2
-    num_repetitions = 2
-    s = Stable(num_features, num_channels, num_leaves, num_repetitions)
-
-    log_cfs = s._log_characteristic_function(t)
-    print(log_cfs)
-
-
-    # test within einet
+    # test computations: density, cdf and cf
 
     # Input dimensions
     in_features = 4
@@ -151,3 +136,62 @@ if __name__ == "__main__":
     print(torch.exp(log_cfs))
 
 
+    # test training via eCFD
+    learning_rate = 0.5
+    momentum = 0.9
+    epochs = 200
+    seed = 47
+
+    sample_size = (100, 1)
+    x1 = torch.distributions.Normal(-5.0, 3.0).sample(sample_size)
+    x2 = torch.distributions.Normal(5.0, 1.0).sample(sample_size)
+    x = torch.hstack((x1, x2))
+
+    num_features = x.shape[1]
+    num_channels = 1
+    depth = 1
+    num_sums = 1
+    num_leaves = 1
+    num_repetitions = 1
+    num_classes = 1
+    dropout = 0.0
+    leaf_type = Normal #Stable
+    leaf_kwargs = {}
+
+    config = EinetConfig(
+        num_features=num_features,
+        num_channels=num_channels,
+        depth=depth,
+        num_sums=num_sums,
+        num_leaves=num_leaves,
+        num_repetitions=num_repetitions,
+        num_classes=num_classes,
+        leaf_type=leaf_type,
+        leaf_kwargs=leaf_kwargs,
+        layer_type="linsum",
+        dropout=0.0,
+    )
+
+    model = Einet(config)
+
+
+
+    distance = model.empirical_characteristic_function_distance(x, seed=seed)
+    lls = torch.sum(model(x))
+    print(f"Distance at epoch 0/{epochs}: {distance:.10f}, log-L: {lls:.6f}")
+    optim = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    
+    for i in range(epochs):
+        optim.zero_grad()
+
+        distance = model.empirical_characteristic_function_distance(x, seed=seed)
+        distance.backward()
+
+        optim.step()
+
+        lls = torch.sum(model(x))
+        if ((i+1) % (epochs/20)) == 0:
+            print(f"Distance at epoch {i+1}/{epochs}: {distance:.10f}, log-L: {lls:.6f}")
+
+    print("final model: ")
+    print(list(model.parameters()))

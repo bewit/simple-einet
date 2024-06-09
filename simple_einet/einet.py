@@ -255,8 +255,6 @@ class Einet(nn.Module):
 
         return t
 
-
-
     def _forward_layers(self, x):
         """
         Forward pass through the inner sum and product layers.
@@ -271,6 +269,51 @@ class Einet(nn.Module):
         for layer in self.layers:
             x = layer(x)
         return x
+    
+    def empirical_characteristic_function_distance(self, x: torch.Tensor, marginalized_scopes: torch.Tensor = None, n_evaluation_nodes: int = 1000, scaling_factor: float = 1.0, seed: int = None) -> torch.Tensor:
+        """
+        Optimization metric for characteristic circuits. Compute the distance between the empirical characateristic function of the data and the einet/characteristic circuit.
+
+        Args:
+          x: Data input.
+        """
+        assert x.ndim == 2, f"Can only handle two-dimensional data by now, but x.ndim was {x.ndim}"
+
+        def empirical_characteristic_function_real(x: torch.Tensor, t: torch.Tensor):
+            return torch.real(torch.mean(torch.exp(1j * (x @ t.T)), dim=0))
+        
+        dim = x.shape[1]
+        if seed:
+            torch.manual_seed(seed)
+        evaluation_nodes = torch.randn(size=(n_evaluation_nodes, dim))
+        evaluation_nodes = evaluation_nodes * scaling_factor**2
+
+        circuit_cf = torch.exp(self.log_characteristic_function(evaluation_nodes, marginalized_scopes))
+        
+        cardinality = dim
+        marginalization_constant = nn.Parameter(torch.zeros(1), requires_grad=False)
+        if marginalized_scopes is not None:
+            # Transform to tensor
+            if type(marginalized_scopes) != torch.Tensor:
+                s = torch.tensor(marginalized_scopes)
+            else:
+                s = marginalized_scopes
+
+            # Adjust for leaf cardinality
+            if self.cardinality > 1:
+                s = marginalized_scopes.div(cardinality, rounding_mode="floor")
+
+            x[:, :, s] = marginalization_constant
+        empirical_cf = empirical_characteristic_function_real(x, evaluation_nodes)
+        
+        # NOTE: the original code compute the distance on complex numbers and takes the real part AFTER that!
+        # TODO: investigate if and how much this differs from computing the distance on the real part only
+        # NOTE: after a short research, there are problems with logsumexp using complex numbers. maybe this could be implemented, but is out of scope for now
+        # (see https://scicomp.stackexchange.com/questions/34273/log-sum-exp-trick-for-signed-complex-numbers)
+        distance = torch.mean(torch.pow(empirical_cf - circuit_cf, 2))
+
+        return distance
+
 
     def posterior(self, x) -> torch.Tensor:
         """

@@ -342,7 +342,7 @@ class AbstractLeaf(AbstractLayer, ABC):
         if t.dim() == 3:  # [N, C, D]
             t = t.unsqueeze(-1).unsqueeze(-1)  # [N, C, D, 1, 1]
         try:
-            t = torch.real(self._log_characteristic_function(t))  # Shape: [n, d, oc, r]
+            t = self._log_characteristic_function(t)  # Shape: [n, d, oc, r]
         except ValueError as e:
             print("min:", t.min())
             print("max:", t.max())
@@ -353,6 +353,9 @@ class AbstractLeaf(AbstractLayer, ABC):
             t[nan_mask] = torch.nan
 
         t = self._marginalize_input(t, marginalized_scopes)
+
+        # NOTE: only returning real part!
+        t = torch.real(t)
 
         return t
 
