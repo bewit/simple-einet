@@ -29,10 +29,10 @@ class Stable(AbstractLeaf):
 
 
         # to DEBUG, set all parameters to the normal distribution
-        _alpha = torch.zeros(1, num_channels, num_features, num_leaves, num_repetitions) + 2.0
-        _beta = torch.zeros(1, num_channels, num_features, num_leaves, num_repetitions) # + 0.1
-        _loc = torch.zeros(1, num_channels, num_features, num_leaves, num_repetitions)
-        _scale = torch.ones(1, num_channels, num_features, num_leaves, num_repetitions) / torch.sqrt(torch.tensor(2.0))
+        # _alpha = torch.zeros(1, num_channels, num_features, num_leaves, num_repetitions) + 2.0
+        # _beta = torch.zeros(1, num_channels, num_features, num_leaves, num_repetitions) # + 0.1
+        # _loc = torch.zeros(1, num_channels, num_features, num_leaves, num_repetitions)
+        # _scale = torch.ones(1, num_channels, num_features, num_leaves, num_repetitions) / torch.sqrt(torch.tensor(2.0))
 
 
         self.alpha = nn.Parameter(_alpha)
@@ -49,10 +49,10 @@ class Stable(AbstractLeaf):
 
         
         # to DEBUG, don't transform parameters already defined as the normal distribution in the constructor
-        _alpha = self.alpha
-        _beta = self.beta
-        _loc = self.loc
-        _scale = self.scale
+        # _alpha = self.alpha
+        # _beta = self.beta
+        # _loc = self.loc
+        # _scale = self.scale
 
         return (_alpha, _beta, _loc, _scale)
 
@@ -63,7 +63,7 @@ class Stable(AbstractLeaf):
         return TorchStable(*euclidian_parameters)
     
 
-    def log_characteristic_function(self, t: torch.Tensor) -> torch.Tensor:   
+    def _log_characteristic_function(self, t: torch.Tensor) -> torch.Tensor:   
         euclidian_parameters = self._get_parameters_in_euclidian_space()
         return TorchStable(*euclidian_parameters).log_characteristic_function(t)
 
@@ -85,10 +85,8 @@ if __name__ == "__main__":
     num_repetitions = 2
     s = Stable(num_features, num_channels, num_leaves, num_repetitions)
 
-    log_cfs = s.log_characteristic_function(t)
+    log_cfs = s._log_characteristic_function(t)
     print(log_cfs)
-
-
 
 
     # test within einet
@@ -118,7 +116,7 @@ if __name__ == "__main__":
     num_repetitions = 2
     num_classes = 1
     dropout = 0.0
-    leaf_type = Stable
+    leaf_type = Normal #Stable
     leaf_kwargs = {}
 
     config = EinetConfig(
@@ -137,12 +135,19 @@ if __name__ == "__main__":
 
     model = Einet(config)
 
+    print("log density")
     lls = model(x)
     print(lls)
     print(torch.exp(lls))
 
+    print("log cdf")
     log_cdfs = model.log_cdf(x)
     print(log_cdfs)
     print(torch.exp(log_cdfs))
+
+    print("log cf")
+    log_cfs = model.log_characteristic_function(x)
+    print(log_cfs)
+    print(torch.exp(log_cfs))
 
 

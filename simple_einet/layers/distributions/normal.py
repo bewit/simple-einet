@@ -36,8 +36,8 @@ class Normal(AbstractLeaf):
 
 
         # to DEBUG, default to standard normal distribution
-        self.means = nn.Parameter(torch.zeros(1, num_channels, num_features, num_leaves, num_repetitions))
-        self.log_stds = nn.Parameter(torch.zeros(1, num_channels, num_features, num_leaves, num_repetitions))
+        # self.means = nn.Parameter(torch.zeros(1, num_channels, num_features, num_leaves, num_repetitions))
+        # self.log_stds = nn.Parameter(torch.zeros(1, num_channels, num_features, num_leaves, num_repetitions))
 
 
 
@@ -45,7 +45,7 @@ class Normal(AbstractLeaf):
         return dist.Normal(loc=self.means, scale=self.log_stds.exp())
     
 
-    def log_characteristic_function(self, t: torch.Tensor): 
+    def _log_characteristic_function(self, t: torch.Tensor): 
         loc = self.means
         scale = self.log_stds.exp()
 

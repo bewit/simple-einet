@@ -56,7 +56,6 @@ def dist_cdf(distribution, x: torch.Tensor):
     if x.dim() == 3:  # [N, C, D]
         x = x.unsqueeze(-1).unsqueeze(-1)  # [N, C, D, 1, 1]
 
-    # Compute log-likelihodd
     try:
         x = distribution.cdf(x)  # Shape: [n, d, oc, r]
     except ValueError as e:
@@ -320,6 +319,42 @@ class AbstractLeaf(AbstractLayer, ABC):
         x = torch.log(x)
 
         return x
+    
+
+    def log_characteristic_function(self, t, marginalized_scopes: List[int]):
+        """
+        Computation of the log of the characteristic function.
+
+        Args:
+            t (torch.Tensor): Input tensor.
+            marginalized_scopes (List[int]): List of scopes to marginalize.
+
+        Returns:
+            torch.Tensor: Output tensor after marginalization.
+        """
+        # Forward through base distribution
+        nan_mask = torch.isnan(t)
+        if nan_mask.any():
+            # Replace nans with some valid value
+            t = torch.where(torch.isnan(t), self.nan_placeholder, t)
+
+        # Perform forward pass
+        if t.dim() == 3:  # [N, C, D]
+            t = t.unsqueeze(-1).unsqueeze(-1)  # [N, C, D, 1, 1]
+        try:
+            t = torch.real(self._log_characteristic_function(t))  # Shape: [n, d, oc, r]
+        except ValueError as e:
+            print("min:", t.min())
+            print("max:", t.max())
+            raise e
+
+        # Set back to nan
+        if nan_mask.any():
+            t[nan_mask] = torch.nan
+
+        t = self._marginalize_input(t, marginalized_scopes)
+
+        return t
 
 
     @abstractmethod
@@ -329,7 +364,7 @@ class AbstractLeaf(AbstractLayer, ABC):
 
 
     @abstractmethod
-    def log_characteristic_function(self, t: torch.Tensor) -> torch.Tensor:
+    def _log_characteristic_function(self, t: torch.Tensor) -> torch.Tensor:
         pass
 
 

@@ -199,6 +199,63 @@ class Einet(nn.Module):
         assert x.shape == (batch_size, self.config.num_classes)
 
         return x
+    
+
+    def log_characteristic_function(self, t: torch.Tensor, marginalized_scopes: torch.Tensor = None) -> torch.Tensor:
+        """
+        Log cf inference pass for the Einet model.
+
+        Args:
+          t (torch.Tensor): Input data of shape [N, C, D], where C is the number of input channels (useful for images) and D is the number of features/random variables (H*W for images).
+          marginalized_scopes: torch.Tensor:  (Default value = None)
+
+        Returns:
+            Probability tensor of the input: p(X) or p(X | C) if number of classes > 1.
+        """
+
+        # Add channel dimension if not present
+        if t.dim() == 2:  # [N, D]
+            t = t.unsqueeze(1)
+
+        if t.dim() == 4:  # [N, C, H, W]
+            t = t.view(t.shape[0], self.config.num_channels, -1)
+
+        assert t.dim() == 3
+        assert (
+            t.shape[1] == self.config.num_channels
+        ), f"Number of channels in input ({t.shape[1]}) does not match number of channels specified in config ({self.config.num_channels})."
+        assert (
+                t.shape[2] == self.config.num_features
+        ), f"Number of features in input ({t.shape[0]}) does not match number of features specified in config ({self.config.num_features})."
+
+        # Apply leaf distributions (replace marginalization indicators with 0.0 first)
+        t = self.leaf.log_characteristic_function(t, marginalized_scopes)
+
+        # Pass through intermediate layers
+        t = self._forward_layers(t)
+
+        # Merge results from the different repetitions into the channel dimension
+        batch_size, features, channels, repetitions = t.size()
+        assert features == 1  # number of features should be 1 at this point
+        assert channels == self.config.num_classes
+
+        # If model has multiple reptitions, perform repetition mixing
+        if self.config.num_repetitions > 1:
+            # Mix repetitions
+            t = self.mixing(t)
+        else:
+            # Remove repetition index
+            t = t.squeeze(-1)
+
+        # Remove feature dimension
+        t = t.squeeze(1)
+
+        # Final shape check
+        assert t.shape == (batch_size, self.config.num_classes)
+
+        return t
+
+
 
     def _forward_layers(self, x):
         """

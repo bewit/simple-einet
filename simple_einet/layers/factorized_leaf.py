@@ -124,6 +124,37 @@ class FactorizedLeaf(AbstractLayer):
             self.num_repetitions,
         )
         return x
+    
+
+    def log_characteristic_function(self, t: torch.Tensor, marginalized_scopes: List[int]):
+        """
+        Computation of the characteristic function the factorized leaf layer.
+        Staying consistent and exploiting the superior runtime behavior of the einsum operation, the cf can be computed by taking the exponent of the result at the top level.
+
+        Args:
+            t (torch.Tensor): Input tensor of shape (batch_size, num_input_channels, num_leaves, num_repetitions).
+            marginalized_scopes (List[int]): List of integers representing the marginalized scopes.
+
+        Returns:
+            torch.Tensor: Output tensor of shape (batch_size, num_output_channels, num_leaves, num_repetitions).
+        """
+        # Compute cf of base leaf
+        t = self.base_leaf.log_characteristic_function(t, marginalized_scopes)
+
+        # Factorize input channels
+        t = t.sum(dim=1)
+
+        # Merge scopes by naive factorization
+        t = torch.einsum("bicr,ior->bocr", t, self.scopes)
+
+
+        assert t.shape == (
+            t.shape[0],
+            self.num_features_out,
+            self.base_leaf.num_leaves,
+            self.num_repetitions,
+        )
+        return t
 
 
     def sample(self, ctx: SamplingContext) -> torch.Tensor:
