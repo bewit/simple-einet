@@ -147,3 +147,5 @@ einet/
 outputs/
 
 *.DS_Store
+
+.vscode/
