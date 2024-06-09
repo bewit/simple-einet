@@ -29,10 +29,10 @@ class Stable(AbstractLeaf):
 
 
         # to DEBUG, set all parameters to the normal distribution
-        # _alpha = torch.zeros(1, num_channels, num_features, num_leaves, num_repetitions) + 1.9
-        # _beta = torch.zeros(1, num_channels, num_features, num_leaves, num_repetitions) + 0.1
-        # _loc = torch.zeros(1, num_channels, num_features, num_leaves, num_repetitions)
-        # _scale = torch.ones(1, num_channels, num_features, num_leaves, num_repetitions) / torch.sqrt(torch.tensor(2.0))
+        _alpha = torch.zeros(1, num_channels, num_features, num_leaves, num_repetitions) + 2.0
+        _beta = torch.zeros(1, num_channels, num_features, num_leaves, num_repetitions) # + 0.1
+        _loc = torch.zeros(1, num_channels, num_features, num_leaves, num_repetitions)
+        _scale = torch.ones(1, num_channels, num_features, num_leaves, num_repetitions) / torch.sqrt(torch.tensor(2.0))
 
 
         self.alpha = nn.Parameter(_alpha)
@@ -41,21 +41,32 @@ class Stable(AbstractLeaf):
         self.scale = nn.Parameter(_scale)
 
 
-    def _get_base_distribution(self, ctx: SamplingContext = None) -> Distribution:
-        # transformation to euclidian space
+    def _get_parameters_in_euclidian_space(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         _alpha = 2. / (1. + torch.exp(-self.alpha))
         _beta = 2. / (1. + torch.exp(-self.beta)) - 1.0
         _loc = self.loc
         _scale = torch.exp(self.scale)
 
+        
         # to DEBUG, don't transform parameters already defined as the normal distribution in the constructor
-        # _alpha = self.alpha
-        # _beta = self.beta
-        # _loc = self.loc
-        # _scale = self.scale
+        _alpha = self.alpha
+        _beta = self.beta
+        _loc = self.loc
+        _scale = self.scale
+
+        return (_alpha, _beta, _loc, _scale)
 
 
-        return TorchStable(alpha=_alpha, beta=_beta, loc=_loc, scale=_scale)
+    def _get_base_distribution(self, ctx: SamplingContext = None) -> Distribution:
+        # transformation to euclidian space
+        euclidian_parameters = self._get_parameters_in_euclidian_space()
+        return TorchStable(*euclidian_parameters)
+    
+
+    def log_characteristic_function(self, t: torch.Tensor) -> torch.Tensor:   
+        euclidian_parameters = self._get_parameters_in_euclidian_space()
+        return TorchStable(*euclidian_parameters).log_characteristic_function(t)
+
     
 
 
@@ -63,6 +74,24 @@ if __name__ == "__main__":
 
     device = "cuda"
     torch.set_default_device(device)
+
+    # test log_characteristic_function
+    num_features = 2
+    batchsize = 2
+    t = torch.zeros(batchsize, num_features)
+
+    num_channels = 1
+    num_leaves = 2
+    num_repetitions = 2
+    s = Stable(num_features, num_channels, num_leaves, num_repetitions)
+
+    log_cfs = s.log_characteristic_function(t)
+    print(log_cfs)
+
+
+
+
+    # test within einet
 
     # Input dimensions
     in_features = 4
@@ -115,3 +144,5 @@ if __name__ == "__main__":
     log_cdfs = model.log_cdf(x)
     print(log_cdfs)
     print(torch.exp(log_cdfs))
+
+
