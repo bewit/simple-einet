@@ -11,6 +11,7 @@
 import math
 from numbers import Number
 from functools import partial
+from typing import Literal
 
 import torch
 from torch import distributions as dist
@@ -222,7 +223,7 @@ def _pdf_single_value_piecewise_Z0(x0, alpha, beta, **kwds):
     zeta = -beta * torch.tan(M_PI * alpha / 2.0)
     x0, alpha, beta = _nolan_round_difficult_input(x0, alpha, beta, zeta, x_tol_near_zeta, alpha_tol_near_one)
 
-    if alpha > 1.999: # alpha == 2.0, but relaxed this because the approximtion is good enough to benefit from speedup here and optimization in log space might never reach alpha=2.0
+    if alpha > 1.99: # alpha == 2.0, but relaxed this because the approximtion is good enough to benefit from speedup here and optimization in log space might never reach alpha=2.0
         return _norm_pdf(x0 * SQRT_1_2) * SQRT_1_2
         # return torch.exp(STANDARD_NORMAL.log_prob(x0 * SQRT_1_2)) * SQRT_1_2
     elif alpha == 0.5 and beta == 1.0:
@@ -236,13 +237,6 @@ def _pdf_single_value_piecewise_Z0(x0, alpha, beta, **kwds):
         if _x <= 0:
             return torch.tensor(0.0)
         return torch.tensor(1.0 / torch.sqrt(2.0 * M_PI * _x) / _x * torch.exp(-1.0 / (2 * _x)))
-    # elif alpha == 0.5 and beta == 0.0 and x0 != 0:
-        # S, C = sc.fresnel([1 / np.sqrt(2 * np.pi * np.abs(x0))])
-        # arg = 1 / (4 * np.abs(x0))
-        # return (
-        #     np.sin(arg) * (0.5 - S[0]) + np.cos(arg) * (0.5 - C[0])
-        # ) / np.sqrt(2 * np.pi * np.abs(x0) ** 3)
-        # cannot implement this as fresnel integrals are not available in torch
     elif alpha == 1.0 and beta == 0.0:
         return 1.0 / (1.0 + torch.pow(x0, 2)) / M_PI
     
@@ -322,7 +316,7 @@ def _cdf_single_value_piecewise_Z0(x0, alpha, beta, **kwds):
     zeta = -beta * torch.tan(M_PI * alpha / 2.)
     x0, alpha, beta = _nolan_round_difficult_input(x0, alpha, beta, zeta, x_tol_near_zeta, alpha_tol_near_one)
 
-    if alpha > 1.999: # alpha == 2.0, but relaxed this because the approximtion is good enough to benefit from speedup here and optimization in log space might never reach alpha=2.0
+    if alpha > 1.99: # alpha == 2.0, but relaxed this because the approximtion is good enough to benefit from speedup here and optimization in log space might never reach alpha=2.0
         return STANDARD_NORMAL.cdf(x0  * SQRT_1_2)
     elif alpha == 0.5 and beta == 1.0:
         _x = x0 + 1.
@@ -333,8 +327,7 @@ def _cdf_single_value_piecewise_Z0(x0, alpha, beta, **kwds):
         x0 = -x0
         _x = x0 + 1.
         if _x <= 0:
-            # TODO: this leads to CDF=0.0 where it clearly should be 1.0, fix this!
-            return torch.tensor(0.)
+            return torch.tensor(1.)
         return torch.erf(torch.sqrt(0.5 / _x))
     elif alpha == 1.0 and beta == 0.0:
         return 0.5 + torch.arctan(x0) / M_PI
@@ -572,7 +565,17 @@ def _fitstart_mcculloch_S1(data, epsilon):
     delta = zeta-beta*c*np.tan(np.pi*alpha/2.) if alpha != 1. else zeta
 
     return (torch.tensor(alpha), torch.tensor(beta), torch.tensor(delta), torch.tensor(c))
-    
+
+
+def fit(data: torch.Tensor, epsilon: float, parameterization: str, method: Literal["quantile"] = "quantile") -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    # TODO: implement MLE on top of quantile parameters
+    if method == "quantile":
+        if parameterization == "S0":
+            return _fitstart_mcculloch_S0(data, epsilon)
+        elif parameterization == "S1":
+            return _fitstart_mcculloch_S1(data, epsilon)
+    else:
+        raise ValueError("Only supporting McCulloch's quantile estimation by now")
 
 
 class TorchStable(Distribution):
@@ -585,7 +588,7 @@ class TorchStable(Distribution):
     has_rsample = False # TODO: implement if necessary
 
     # levy_stable parameters
-    parametrization = "S1"
+    parameterization = "S1"
     pdf_default_method = "piecewise"
     cdf_default_method = "piecewise"
     piecewise_x_tol_near_zeta = torch.tensor(0.005)
@@ -599,9 +602,9 @@ class TorchStable(Distribution):
             batch_shape = self.loc.size()
         super().__init__(batch_shape=batch_shape, validate_args=validate_args)
 
-    def _parametrization(self):
+    def _parameterization(self):
         allowed = ("S0", "S1")
-        pz = self.parametrization
+        pz = self.parameterization
         if pz not in allowed:
             raise RuntimeError(f"Parametrization '{pz}' not in supported list: {allowed}")
         return pz
@@ -618,10 +621,18 @@ class TorchStable(Distribution):
         raise NotImplementedError("Sampling not implemented")
     
 
+    def characteristic_function(self, t: torch.Tensor) -> torch.Tensor:
+        t = (t - self.loc) / self.scale
+        if self._parameterization() == "S0":
+            return _cf_Z0(t, self.alpha, self.beta)
+        elif self._parameterization() == "S1":
+            return _cf_Z1(t, self.alpha, self.beta)
+    
+
     def pdf(self, value: torch.Tensor) -> torch.Tensor:
-        if self._parametrization() == "S0":
+        if self._parameterization() == "S0":
             return self._pdf(value, self.alpha, self.beta, self.loc, self.scale)
-        elif self._parametrization() == "S1":
+        elif self._parameterization() == "S1":
             alpha = self.alpha
             beta = self.beta
             loc = self.loc
@@ -645,7 +656,7 @@ class TorchStable(Distribution):
                         _delta = loc + 2*_beta*scale * torch.log(scale) / M_PI
                     else:
                         _delta = loc
-                    _delta = (loc + 2*_beta*scale * torch.log(scale) / M_PI if _alpha==1.0 else loc)
+                    # _delta = (loc + 2*_beta*scale * torch.log(scale) / M_PI if _alpha==1.0 else loc)
                     data_mask = torch.all(data_in[:, 1:] == pair, dim=-1)
                     _x = data_in[data_mask, 0]
                     data_out[data_mask] = self._pdf(_x, _alpha, _beta, loc=_delta, scale=scale).reshape(len(_x), 1)
@@ -658,11 +669,11 @@ class TorchStable(Distribution):
     
 
     def _pdf(self, value, alpha, beta, loc, scale) -> torch.Tensor:
-        if self._parametrization() == "S0":
+        if self._parameterization() == "S0":
             _pdf_single_value_piecewise = _pdf_single_value_piecewise_Z0
             _pdf_single_value_cf_integrate = _pdf_single_value_cf_integrate_Z0
             _cf = _cf_Z0
-        elif self._parametrization() == "S1":
+        elif self._parameterization() == "S1":
             _pdf_single_value_piecewise = _pdf_single_value_piecewise_Z1
             _pdf_single_value_cf_integrate = _pdf_single_value_cf_integrate_Z1
             _cf = _cf_Z1
@@ -720,9 +731,9 @@ class TorchStable(Distribution):
     
 
     def cdf(self, value: torch.Tensor) -> torch.Tensor:
-        if self._parametrization() == "S0":
+        if self._parameterization() == "S0":
             return self._cdf(value, self.alpha, self.beta, self.loc, self.scale)
-        elif self._parametrization() == "S1":
+        elif self._parameterization() == "S1":
             alpha = self.alpha
             beta = self.beta
             loc = self.loc
@@ -746,7 +757,7 @@ class TorchStable(Distribution):
                         _delta = loc + 2*_beta*scale * torch.log(scale) / M_PI
                     else:
                         _delta = loc
-                    _delta = (loc + 2*_beta*scale * torch.log(scale) / M_PI if _alpha==1.0 else loc)
+                    # _delta = (loc + 2*_beta*scale * torch.log(scale) / M_PI if _alpha==1.0 else loc)
                     data_mask = torch.all(data_in[:, 1:] == pair, dim=-1)
                     _x = data_in[data_mask, 0]
                     data_out[data_mask] = self._cdf(_x, _alpha, _beta, loc=_delta, scale=scale).reshape(len(_x), 1)
@@ -757,10 +768,10 @@ class TorchStable(Distribution):
     
 
     def _cdf(self, value, alpha, beta, loc, scale):
-        if self._parametrization() == "S0":
+        if self._parameterization() == "S0":
             _cdf_single_value_piecewise = _cdf_single_value_piecewise_Z0
             _cf = _cf_Z0
-        elif self._parametrization() == "S1":
+        elif self._parameterization() == "S1":
             _cdf_single_value_piecewise = _cdf_single_value_piecewise_Z1
             _cf = _cf_Z1
 
@@ -808,12 +819,12 @@ class TorchStable(Distribution):
 
     def _fitstart(self, data, epsilon=1e-6):
         # TODO: implemented MLE method as described in Nolan2020
-        if self._parametrization() == "S0":
+        if self._parameterization() == "S0":
             _fitstart = _fitstart_mcculloch_S0
-        elif self._parametrization() == "S1":
+        elif self._parameterization() == "S1":
             _fitstart = _fitstart_mcculloch_S1
         return _fitstart(data, epsilon=epsilon)
-
+    
 
     def icdf(self, value: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
@@ -821,4 +832,156 @@ class TorchStable(Distribution):
 
     def entropy(self):
         raise NotImplementedError
+
+
     
+
+
+if __name__ == "__main__":
+    import numpy as np
+    from scipy.stats import levy_stable
+    from tabulate import tabulate
+
+    
+    if torch.cuda.is_available():
+        device = "cuda"
+    else:
+        device = "cpu"
+    print(f"Torch current device: {device}")
+    torch.set_default_device(device)
+
+
+    # qualitative analysis
+    print("=============== Test ===============")
+
+    params_set = [
+        {"alpha": 2.0, "beta": 0.0, "loc": 0.0, "scale": 1./np.sqrt(2.)},
+        {"alpha": 1.9991, "beta": 0.0, "loc": 0.0, "scale": 1./np.sqrt(2.)},
+        {"alpha": 1.999, "beta": 0.0, "loc": 0.0, "scale": 1./np.sqrt(2.)},
+        {"alpha": 1.99, "beta": 0.0, "loc": 0.0, "scale": 1./np.sqrt(2.)},
+        {"alpha": 1.9, "beta": 0.0, "loc": 0.0, "scale": 1./np.sqrt(2.)},
+        {"alpha": 1.5, "beta": 0.0, "loc": 0.0, "scale": 1.0},
+        {"alpha": 1.5, "beta": 0.5, "loc": 0.0, "scale": 1.0},
+        {"alpha": 1.5, "beta": 1.0, "loc": 0.0, "scale": 1.0},
+        {"alpha": 1.5, "beta": -1.0, "loc": 0.0, "scale": 1.0},
+        {"alpha": 1.0, "beta": 0.0, "loc": 0.0, "scale": 1.0},        
+        {"alpha": 1.0, "beta": 0.5, "loc": 0.0, "scale": 1.0},
+        {"alpha": 1.0, "beta": 1.0, "loc": 0.0, "scale": 1.0},
+        {"alpha": 1.0, "beta": -1.0, "loc": 0.0, "scale": 1.0},
+        {"alpha": 0.5, "beta": 0.0, "loc": 0.0, "scale": 1.0},
+        {"alpha": 0.5, "beta": 0.5, "loc": 0.0, "scale": 1.0},
+        {"alpha": 0.5, "beta": 1.0, "loc": 0.0, "scale": 1.0},
+        {"alpha": 0.5, "beta": -1.0, "loc": 0.0, "scale": 1.0},
+    ]
+
+
+    def tail_prob(x, alpha, beta, scale):
+        # in the limit x->inf, this returns the one-sided probability X > x (given 0 parametrization!)
+        c_alpha = torch.sin(M_PI * alpha / 2.) * torch.exp(torch.lgamma(alpha)) / M_PI
+        p = torch.pow(scale, alpha) * c_alpha * (1 + beta) / torch.pow(x, alpha)
+        return p
+
+    for params in params_set:
+        alpha = params["alpha"]
+        beta = params["beta"]
+        loc = params["loc"]
+        scale = params["scale"]
+
+        parameterization = "S0"
+        torch_stable = TorchStable(alpha=torch.tensor(alpha), beta=torch.tensor(beta), loc=torch.tensor(loc), scale=torch.tensor(scale))
+        torch_stable.parameterization = parameterization
+        levy_stable.parameterization = parameterization
+        # scipy_stable = levy_stable(alpha=alpha, beta=beta, loc=loc, scale=scale)
+
+
+
+        logvals = np.logspace(-5, 5, 11)
+        x = list((-1) * logvals) + list(logvals)
+        x.sort()
+        data = x
+
+        print("Params: ")
+        print(params)
+
+        results = {"data": data}
+
+        torch_densities = torch_stable.pdf(torch.tensor(data))
+        # print(torch_densities)
+        results["t-PDF"] = torch_densities
+        scipy_densities = levy_stable.pdf(x=data, alpha=alpha, beta=beta, loc=loc, scale=scale)
+        # print(scipy_densities)
+        results["s-PDF"] = scipy_densities
+        torch_probs = torch_stable.cdf(torch.tensor(data))
+        results["t-CDF"] = torch_probs
+        # print(torch_probs)
+        scipy_probs = levy_stable.cdf(x=data, alpha=alpha, beta=beta, loc=loc, scale=scale)
+        results["s-CDF"] = scipy_probs
+        # print(scipy_probs)
+        tail_probs = tail_prob(torch.tensor(x), torch.tensor(alpha), torch.tensor(beta), torch.tensor(scale))
+        results["tail-probs"] = tail_probs
+        # print(tail_probs)
+        print(tabulate(results, headers="keys"))
+
+
+
+    # timing
+    import timeit
+    from functools import partial
+    from torch.distributions import Normal
+    from scipy.stats import norm
+    from torch.utils import benchmark 
+    from rtpt import RTPT
+
+
+    print("=============== Timing ===============")
+    max_iter = len(params_set)
+    rtpt = RTPT(name_initials="BW", experiment_name="TorchStable distribution benchmark", max_iterations=max_iter)
+    rtpt.start()
+
+    for i, params in enumerate(params_set):
+        alpha = params["alpha"]
+        beta = params["beta"]
+        loc = params["loc"]
+        scale = params["scale"]
+
+        print("Params:")
+        print(params)
+
+        #torch_stable = TorchStable(alpha=torch.tensor(alpha), beta=torch.tensor(beta), loc=torch.tensor(loc), scale=torch.tensor(scale))
+        torch_stable_setup = "from __main__ import TorchStable \ntorch_stable = TorchStable(torch.tensor(alpha), torch.tensor(beta), torch.tensor(loc), torch.tensor(scale))"
+        scipy_stable = levy_stable(alpha=alpha, beta=beta, loc=loc, scale=scale)
+
+        n = 100
+        vals = np.random.random((n, 1))
+        torch_vals = torch.tensor(vals)
+
+        repeats = 1
+        number = 100
+        # torch_time_pdf = timeit.Timer(partial(torch_stable.pdf, torch_vals)).repeat(repeat=repeats, number=number)
+        torch_time_pdf = benchmark.Timer(stmt="torch_stable.pdf(x)", setup=torch_stable_setup, globals={"alpha": alpha, "beta": beta, "loc": loc, "scale": scale, "x": torch_vals})
+        print(torch_time_pdf.timeit(number))
+        scipy_time_pdf = min(timeit.Timer(partial(scipy_stable.pdf, vals)).repeat(repeat=repeats, number=number)) / number
+        print(f"Scipy stable PDF: {scipy_time_pdf} seconds")
+        torch_time_cdf = benchmark.Timer(stmt="torch_stable.cdf(x)", setup=torch_stable_setup, globals={"alpha": alpha, "beta": beta, "loc": loc, "scale": scale, "x": torch_vals})
+        print(torch_time_cdf.timeit(number))
+        scipy_time_cdf = min(timeit.Timer(partial(scipy_stable.cdf, vals)).repeat(repeat=repeats, number=number)) / number
+        print(f"Scipy stable CDF: {scipy_time_cdf} seconds")
+
+
+        if alpha == 2.0:
+            # torch_normal = Normal(loc=torch.tensor(loc), scale=torch.tensor(scale * np.sqrt(2.)))
+            torch_normal_setup = """from torch.distributions import Normal \nnormal = Normal(loc=torch.tensor(loc), scale=torch.tensor(scale))"""
+            scipy_normal = norm(loc=loc, scale=scale*np.sqrt(2.))
+
+
+            torch_normal_time_pdf = benchmark.Timer(stmt="torch.exp(normal.log_prob(x))", setup=torch_normal_setup, globals={"loc": loc, "scale": scale, "x": torch_vals})
+            print(torch_normal_time_pdf.timeit(number))            
+            scipy_normal_time_pdf = min(timeit.Timer(partial(scipy_normal.pdf, vals)).repeat(repeat=repeats, number=number)) / number
+            print(f"Scipy normal PDF: {scipy_normal_time_pdf} seconds")
+            torch_normal_time_cdf = benchmark.Timer(stmt="normal.cdf(x)", setup=torch_normal_setup, globals={"loc": loc, "scale": scale, "x": torch_vals})
+            print(torch_normal_time_cdf.timeit(number))
+            scipy_normal_time_cdf = min(timeit.Timer(partial(scipy_normal.cdf, vals)).repeat(repeat=repeats, number=number)) / number
+            print(f"Scipy normal CDF: {scipy_normal_time_cdf} seconds")
+
+
+        rtpt.step(f"{i+1}/{max_iter}")
